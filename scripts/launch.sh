@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Launch a numbered agent session for a directory, shown in a popup.
-# Args: <dir> [origin-window-id] [agent-name]
+# Args: [--attach] <dir> [origin-window-id] [agent-name] [resume-ref]
 #   <dir> / [origin-window-id] are expanded by run-shell in the binding.
 #   [agent-name] selects an entry from @agent_agents (pi/codex/claude...).
-#   When omitted, @agent_default_command is used.
+#   [resume-ref] resumes saved Pi/Codex/Claude history. --attach reuses the
+#   current picker popup instead of trying to open a second popup.
+#   When agent-name is omitted, @agent_default_command is used.
 # By default each launch creates a numbered instance. Set
 # @agent_multiple_instances off to restore one session per directory/agent.
 set -uo pipefail
@@ -12,9 +14,16 @@ ROOT="$(cd "$DIR/.." && pwd)"
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
 
+attach_in_current_popup=0
+if [ "${1:-}" = '--attach' ]; then
+  attach_in_current_popup=1
+  shift
+fi
+
 path="${1:-$PWD}"
 window="${2:-}"
 agent="${3:-}"
+resume_ref="${4:-}"
 
 prefix="$(agent_session_prefix)"
 default_cmd="pi -e '$ROOT/extensions/tmux-state.ts'"
@@ -36,12 +45,34 @@ else
   session_base="${prefix}$(session_hash "$path")"
 fi
 
+if [ -n "$resume_ref" ]; then
+  if [ ! -d "$path" ]; then
+    tmux display-message "Cannot resume history: project directory no longer exists: $path"
+    exit 0
+  fi
+  resume_ref_q="$(printf '%q' "$resume_ref")"
+  case "$agent" in
+  pi) cmd="$cmd --session $resume_ref_q" ;;
+  codex) cmd="$cmd resume $resume_ref_q" ;;
+  claude) cmd="$cmd --resume $resume_ref_q" ;;
+  *)
+    tmux display-message "History resume is unsupported for agent: $agent"
+    exit 0
+    ;;
+  esac
+fi
+
 if is_managed_session "$(tmux display-message -p '#S')"; then
   tmux display-message 'Agent popup already open'
   exit 0
 fi
 
 multiple_instances="$(get_tmux_option @agent_multiple_instances 'on')"
+# A selected historical conversation must never fall through to an unrelated
+# reusable session when multiple instances are disabled.
+if [ -n "$resume_ref" ]; then
+  multiple_instances=on
+fi
 created=0
 instance=''
 if [ "$multiple_instances" = on ]; then
@@ -91,6 +122,7 @@ if [ "$created" -eq 1 ]; then
   # can display pi-1 / pi-2 without having to parse the internal session name.
   tmux set-option -t "$session" @agent_tool "$tool"
   [ -n "$instance" ] && tmux set-option -t "$session" @agent_instance "$instance"
+  [ -n "$resume_ref" ] && tmux set-option -t "$session" @agent_history_id "$resume_ref"
 fi
 
 agent_pane="$(tmux list-panes -t "$session" -F '#{pane_id}' 2>/dev/null | head -n 1)"
@@ -104,4 +136,8 @@ fi
 mark_managed_session_seen_if_done "$session"
 
 session_q=$(printf '%q' "$session")
-tmux display-popup -w "$w" -h "$h" -E "tmux attach-session -t $session_q"
+if [ "$attach_in_current_popup" -eq 1 ]; then
+  tmux attach-session -t "$session"
+else
+  tmux display-popup -w "$w" -h "$h" -E "tmux attach-session -t $session_q"
+fi

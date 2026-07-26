@@ -40,6 +40,25 @@ DAEMON_MOCK
 chmod +x "$MOCK_BIN/state-daemon"
 export DAEMON_LOG AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
 
+cat >"$MOCK_BIN/history-reader" <<'HISTORY_MOCK'
+#!/usr/bin/env bash
+case "${1:-}" in
+list) printf '%s\n' "${HISTORY_MOCK_ROWS:-}" ;;
+preview) printf '%s\n' "preview:${2:-}:${3:-}" ;;
+esac
+HISTORY_MOCK
+chmod +x "$MOCK_BIN/history-reader"
+
+FZF_LOG="$TMP_ROOT/fzf.log"
+: >"$FZF_LOG"
+cat >"$MOCK_BIN/fzf" <<'FZF_MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$FZF_LOG"
+cat >/dev/null
+FZF_MOCK
+chmod +x "$MOCK_BIN/fzf"
+export FZF_LOG
+
 export PATH="$MOCK_BIN:$PATH"
 export TMUX_MOCK_LOG="$TMUX_LOG"
 
@@ -49,7 +68,8 @@ FAIL=0
 reset_mocks() {
   : >"$TMUX_LOG"
   : >"$DAEMON_LOG"
-  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS
+  : >"$FZF_LOG"
+  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS HISTORY_MOCK_ROWS
   unset TMUX_MOCK_OPTIONS TMUX_MOCK_TARGET_OPTIONS TMUX_MOCK_STATUS_OPTIONS \
     TMUX_MOCK_LIST_SESSIONS TMUX_MOCK_LIST_PANES TMUX_MOCK_LIST_CLIENTS \
     TMUX_MOCK_LIST_PANES_PICKER TMUX_MOCK_LIST_PANES_STATUS \
@@ -294,6 +314,33 @@ TMUX_MOCK_TARGET_OPTIONS="%1|@agent_state=done"$'\n'"%1|@agent_state_at=$picker_
 out="$(run_bash 'scripts/picker.sh --list')"
 assert_contains 'picker --list reads manual pane state and timestamp' "$out" $'pane\t%1\t🔵 done   \tmanual-proj\t0s'
 
+# Tab mode reloads use --list-mode. History rows retain an absolute cwd and
+# resume reference in hidden fields while displaying a compact saved record.
+reset_mocks
+mode_file="$TMP_ROOT/picker-mode"
+printf 'history' >"$mode_file"
+TMUX_MOCK_OPTIONS="@agent_history_binary=$MOCK_BIN/history-reader"
+PICKER_NOW=200
+HISTORY_MOCK_ROWS=$'pi\t/tmp/pi.jsonl\tpi-id\t/Users/example/project\t190\tFix auth\ncodex\t/tmp/codex.jsonl\tcodex-id\t/tmp/code\t180\tReview release\nclaude\t/tmp/claude.jsonl\tclaude-id\t/tmp/docs\t170\tUpdate docs'
+out="$(run_bash "scripts/picker.sh --list-mode '$mode_file'")"
+assert_contains 'picker history mode lists Pi conversations' "$out" $'history\t/tmp/pi.jsonl\t📚 history\tproject\t10s\t/Users/example/project\tFix auth\tpi'
+assert_contains 'picker history mode uses the Pi file as resume reference' "$out" $'pi\t\t/Users/example/project\t/tmp/pi.jsonl'
+assert_contains 'picker history mode lists Codex conversations' "$out" $'history\t/tmp/codex.jsonl\t📚 history\tcode\t20s\t/tmp/code\tReview release\tcodex'
+assert_contains 'picker history mode uses the Codex id as resume reference' "$out" $'codex\t\t/tmp/code\tcodex-id'
+assert_contains 'picker history mode lists Claude conversations' "$out" $'history\t/tmp/claude.jsonl\t📚 history\tdocs\t30s\t/tmp/docs\tUpdate docs\tclaude'
+
+run_bash "scripts/picker.sh --toggle-mode '$mode_file'"
+assert_eq 'picker Tab toggle returns history mode to live mode' 'live' "$(<"$mode_file")"
+run_bash "scripts/picker.sh --toggle-mode '$mode_file'"
+assert_eq 'picker Tab toggle switches live mode to history mode' 'history' "$(<"$mode_file")"
+
+reset_mocks
+run_bash 'scripts/picker.sh test-client' >/dev/null
+fzf_arguments="$(<"$FZF_LOG")"
+assert_contains 'picker binds Tab to toggle live and history modes' "$fzf_arguments" 'tab:execute-silent('
+assert_contains 'picker Tab binding reloads the selected mode' "$fzf_arguments" '--list-mode'
+assert_contains 'picker uses the shared live/history display field' "$fzf_arguments" '--with-nth=13'
+
 reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 TMUX_MOCK_LIST_PANES=$'work\t%1\tpi\t123\t/tmp/manual-proj'
@@ -456,6 +503,30 @@ run_bash 'scripts/launch.sh /tmp/project @9 nope' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'launch.sh reports unknown named agent' "$log_contents" $'display-message\tUnknown agent: nope'
 assert_not_contains 'launch.sh does not open popup for unknown agent' "$log_contents" $'display-popup'
+
+reset_mocks
+TMUX_MOCK_CURRENT_SESSION='work'
+TMUX_MOCK_OPTIONS=$'@agent_agents=pi=pi --custom'
+run_bash 'scripts/launch.sh --attach /tmp @9 pi /tmp/pi-session.jsonl' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'launch.sh resumes Pi history by file' "$log_contents" $'pi --custom --session /tmp/pi-session.jsonl'
+assert_contains 'launch.sh records the resumed history reference' "$log_contents" $'@agent_history_id\t/tmp/pi-session.jsonl'
+assert_contains 'launch.sh attaches history inside the picker popup' "$log_contents" $'attach-session\t-t\tagent-pi-'
+assert_not_contains 'launch.sh does not open a second popup for history' "$log_contents" $'display-popup\t'
+
+reset_mocks
+TMUX_MOCK_CURRENT_SESSION='work'
+TMUX_MOCK_OPTIONS=$'@agent_agents=codex=codex --search\n@agent_multiple_instances=off'
+run_bash 'scripts/launch.sh --attach /tmp @9 codex 019f-codex' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'launch.sh resumes Codex history by session id' "$log_contents" $'codex --search resume 019f-codex'
+assert_contains 'launch.sh forces a numbered session for selected history' "$log_contents" $'new-session\t-d\t-s\tagent-codex-'
+
+reset_mocks
+TMUX_MOCK_CURRENT_SESSION='work'
+TMUX_MOCK_OPTIONS=$'@agent_agents=claude=claude'
+run_bash 'scripts/launch.sh --attach /tmp @9 claude claude-id' >/dev/null
+assert_contains 'launch.sh resumes Claude history by session id' "$(<"$TMUX_LOG")" $'claude --resume claude-id'
 
 # daemon client / lifecycle integration
 reset_mocks

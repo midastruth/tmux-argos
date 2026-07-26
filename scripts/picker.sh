@@ -1,14 +1,54 @@
 #!/usr/bin/env bash
-# Interactive picker for running agent sessions.
+# Interactive picker for live agent sessions and saved conversation history.
 #
-#   picker.sh           fzf picker; on enter, switches the parent client to the
-#                       chosen session's origin window and resumes it in the popup.
-#                       Manually-started agent panes are also listed and jumped to.
-#   picker.sh --list    print the rows only (used by fzf's ctrl-x reload).
+#   picker.sh           fzf picker; Tab switches between live and history rows.
+#   picker.sh --list    print live rows only (used by tests and reload actions).
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$DIR/.." && pwd)"
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
+
+expand_home_path() {
+  local tilde='~'
+  case "$1" in
+  "$tilde") printf '%s' "$HOME" ;;
+  "$tilde/"*) printf '%s/%s' "$HOME" "${1#"$tilde/"}" ;;
+  *) printf '%s' "$1" ;;
+  esac
+}
+
+picker_mode() {
+  local mode_file="$1" mode
+  if [ ! -r "$mode_file" ]; then
+    printf 'live'
+    return
+  fi
+  mode="$(<"$mode_file")"
+  if [ "$mode" = history ]; then
+    printf 'history'
+  else
+    printf 'live'
+  fi
+}
+
+if [ -n "${AGENT_HISTORY_BINARY:-}" ]; then
+  history_binary="$AGENT_HISTORY_BINARY"
+else
+  history_binary="$(expand_home_path "$(get_tmux_option @agent_history_binary "$ROOT/daemon/target/release/tmux-agents-history")")"
+fi
+export AGENT_HISTORY_BINARY="$history_binary"
+
+# Preview subprocesses are started repeatedly as fzf selection changes. Handle
+# them before loading live-picker configuration or daemon state.
+[ "${1:-}" = '--preview' ] && {
+  case "${2:-}" in
+  session|pane) tmux capture-pane -ept "${3:-}" ;;
+  history) "$history_binary" preview "${4:-}" "${3:-}" 2>&1 ;;
+  history-error) printf '%s\n' 'Build the bundled history reader, then reload the plugin:' '' 'cargo build --release --manifest-path daemon/Cargo.toml' ;;
+  esac
+  exit 0
+}
 
 # Cache hot global options for this invocation. The picker enumerates every
 # session/pane and should not shell out to tmux for static config per row.
@@ -17,10 +57,9 @@ AGENT_DETECT_COMMANDS="$(detect_commands)"
 AGENT_DETECT_WRAPPERS="$(wrapper_commands)"
 export AGENT_SESSION_PREFIX AGENT_DETECT_COMMANDS AGENT_DETECT_WRAPPERS
 
-# One daemon snapshot supplies every row; the picker never reads legacy tmux
-# state options. If the daemon is unavailable, rows remain discoverable with an
-# unknown/manual state.
-daemon_records="$("$DIR/daemon.sh" snapshot-picker 2>/dev/null || true)"
+# One lazily-loaded daemon snapshot supplies every live row. History toggles
+# and previews do not need daemon state and must stay cheap.
+daemon_records=''
 
 # lookup_daemon_state <session|pane> <target>
 # On a match, sets daemon_state and daemon_at in the caller's scope and returns
@@ -151,7 +190,9 @@ emit_manual_rows() {
     [ -z "$pane" ] && continue
     is_managed_session "$s" && continue
     if is_wrapper_command "${cmd##*/}"; then
+      # shellcheck disable=SC2034 # resolve_pane_agent reads these via dynamic scope
       AGENT_PS_TABLE="$(process_table_snapshot 2>/dev/null || true)"
+      # shellcheck disable=SC2034 # resolve_pane_agent reads these via dynamic scope
       AGENT_PS_TABLE_READY=1
       break
     fi
@@ -200,11 +241,8 @@ emit_manual_rows() {
   done <<< "$panes"
 }
 
-emit_rows() {
-  {
-    emit_managed_rows
-    emit_manual_rows
-  } | awk 'BEGIN { FS = OFS = "\t" }
+format_rows() {
+  awk 'BEGIN { FS = OFS = "\t" }
       {
         # Decorate: convert the humanized age (45s/12m/3h/2d/-) back into
         # seconds so the numeric sort compares real ages. Sorting the display
@@ -225,11 +263,9 @@ emit_rows() {
     # finished just now sits at the top of its group. Field 1 is the sort
     # decoration (age in seconds), field 2 the rank; strip it after sorting.
     sort -t$'\t' -k2,2n -k1,1n | cut -f2- |
-    # Append a pre-aligned display column (field 10). Two passes: first find the
-    # widest project name and tool name, then pad every row to those widths so
-    # the tool, age and path columns line up. Logic fields 1-9 stay untouched
-    # for enter/ctrl-x. Field order: 1 rank, 2 kind, 3 target, 4 label,
-    # 5 name, 6 age, 7 path, 8 desc, 9 tool.
+    # Append a pre-aligned display column (field 13). Two passes first find the
+    # widest project/tool names, then pad every row. Fields 1-9 are common row
+    # metadata; fields 11/12 hold the cwd/resume reference for history rows.
     awk 'BEGIN { FS = OFS = "\t" }
       {
         rows[NR] = $0
@@ -241,9 +277,52 @@ emit_rows() {
           split(rows[i], f, "\t")
           disp = sprintf("%s  %-*s  %-*s  %4s  %s — %s", \
             f[4], tw, f[9], w, f[5], f[6], f[7], f[8])
-          print rows[i], disp
+          # Keep twelve fixed logic fields so live and history rows share one
+          # fzf display field. Fields 11/12 carry history cwd/resume metadata.
+          print f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], \
+            f[10], f[11], f[12], disp
         }
       }'
+}
+
+emit_rows() {
+  # The picker never reads legacy tmux state options for managed rows. If the
+  # daemon is unavailable, rows remain discoverable with unknown/manual state.
+  daemon_records="$("$DIR/daemon.sh" snapshot-picker 2>/dev/null || true)"
+  {
+    emit_managed_rows
+    emit_manual_rows
+  } | format_rows
+}
+
+emit_history_rows() {
+  local now agent source session_id cwd updated title resume name ago disp_path
+  local history_pi_dir history_codex_dir history_claude_dir
+  now="$(picker_now)"
+  history_pi_dir="$(expand_home_path "$(get_tmux_option @agent_history_pi_dir "$HOME/.pi/agent/sessions")")"
+  history_codex_dir="$(expand_home_path "$(get_tmux_option @agent_history_codex_dir "$HOME/.codex")")"
+  history_claude_dir="$(expand_home_path "$(get_tmux_option @agent_history_claude_dir "$HOME/.claude")")"
+  if [ ! -x "$history_binary" ]; then
+    printf '4\thistory-error\t-\t⚠ history\thistory unavailable\t-\t-\tbuild the history binary with cargo build --release --manifest-path daemon/Cargo.toml\t-\t\t\t\n' |
+      format_rows
+    return 0
+  fi
+
+  "$history_binary" list "$history_pi_dir" "$history_codex_dir" "$history_claude_dir" 2>/dev/null |
+    while IFS=$'\t' read -r agent source session_id cwd updated title; do
+      [ -n "$agent" ] && [ -n "$source" ] && [ -n "$session_id" ] || continue
+      case "$agent" in
+      pi) resume="$source" ;;
+      codex|claude) resume="$session_id" ;;
+      *) continue ;;
+      esac
+      humanize_ago "$updated" "$now"
+      short_path "$cwd"
+      name="${cwd##*/}"
+      [ -n "$name" ] || name='/'
+      printf '4\thistory\t%s\t📚 history\t%s\t%s\t%s\t%s\t%s\t\t%s\t%s\n' \
+        "$source" "$name" "$ago" "$disp_path" "$title" "$agent" "$cwd" "$resume"
+    done | format_rows
 }
 
 kill_target() {
@@ -294,17 +373,50 @@ open_pane_target() {
   fi
 }
 
+open_history_target() {
+  local source="$1" agent="$2" cwd="$3" resume="$4" parent window
+  [ -n "$source" ] && [ -n "$cwd" ] && [ -n "$resume" ] || return 0
+  parent="${parent_client:-}"
+  window=''
+  if [ -n "$parent" ]; then
+    window="$(tmux display-message -p -c "$parent" '#{window_id}' 2>/dev/null || true)"
+  fi
+  "$DIR/launch.sh" --attach "$cwd" "$window" "$agent" "$resume"
+}
+
 open_target() {
-  local kind="$1" target="$2"
+  local kind="$1" target="$2" tool="${3:-}" cwd="${4:-}" resume="${5:-}"
   case "$kind" in
   session) open_session_target "$target" ;;
-  pane)    open_pane_target "$target" ;;
+  pane) open_pane_target "$target" ;;
+  history) open_history_target "$target" "$tool" "$cwd" "$resume" ;;
   esac
 }
 
 [ "${1:-}" = '--list' ] && {
   emit_rows
   exit $?
+}
+
+[ "${1:-}" = '--list-mode' ] && {
+  mode_file="${2:-}"
+  if [ -n "$mode_file" ] && [ "$(picker_mode "$mode_file")" = history ]; then
+    emit_history_rows
+  else
+    emit_rows
+  fi
+  exit $?
+}
+
+[ "${1:-}" = '--toggle-mode' ] && {
+  mode_file="${2:-}"
+  [ -n "$mode_file" ] || exit 0
+  if [ "$(picker_mode "$mode_file")" = history ]; then
+    printf 'live' >"$mode_file"
+  else
+    printf 'history' >"$mode_file"
+  fi
+  exit 0
 }
 
 [ "${1:-}" = '--kill' ] && {
@@ -320,15 +432,22 @@ if ! command -v fzf >/dev/null 2>&1; then
 fi
 
 self="${BASH_SOURCE[0]}"
-self_cmd=$(printf '%q' "$self")
+self_cmd="$(printf '%q' "$self")"
+mode_file="$(mktemp "${TMPDIR:-/tmp}/agent-picker-mode.XXXXXX")" || exit 0
+trap 'rm -f "$mode_file"' EXIT
+printf 'live' >"$mode_file"
+mode_file_q="$(printf '%q' "$mode_file")"
 export FZF_DEFAULT_OPTS=''
-sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=10 \
-  --reverse --cycle --header='Agent sessions/panes · enter: jump · ctrl-x: kill/interrupt' \
-  --preview="tmux capture-pane -ept {3}" --preview-window='right,62%,wrap' \
-  --bind="ctrl-x:execute-silent($self_cmd --kill {2} {3})+reload($self_cmd --list)")
+sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=13 \
+  --reverse --cycle --header='Agent sessions · Tab: live/history · enter: open/resume · ctrl-x: kill live target' \
+  --preview="$self_cmd --preview {2} {3} {9}" --preview-window='right,62%,wrap' \
+  --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3})+reload($self_cmd --list-mode $mode_file_q)")
 
 [ -z "$sel" ] && exit 0
-kind=$(printf '%s' "$sel" | cut -f2)
-target=$(printf '%s' "$sel" | cut -f3)
+kind="$(printf '%s' "$sel" | cut -f2)"
+target="$(printf '%s' "$sel" | cut -f3)"
+tool="$(printf '%s' "$sel" | cut -f9)"
+history_cwd="$(printf '%s' "$sel" | cut -f11)"
+resume_ref="$(printf '%s' "$sel" | cut -f12)"
 
-open_target "$kind" "$target"
+open_target "$kind" "$target" "$tool" "$history_cwd" "$resume_ref"

@@ -18,6 +18,8 @@ or swap agents via `@agent_agents`.
 - 🟡 **Live status** per session: `blocked` / `working` / `done` / `idle` (Pi
   events plus Herdr-style Codex/Claude screen detection).
 - 👁️ **Live preview** of each session's screen in the picker.
+- 📚 **Unified history**: press `Tab` in the picker to search saved Pi, Codex,
+  and Claude conversations, preview recent messages, and resume one in a managed popup.
 - 🎯 **Smart jump** back to the window where the session was launched.
 - 🚀 **Launcher** (`prefix` + `y`) to open or attach an agent session for the
   current directory.
@@ -55,7 +57,7 @@ set -g extended-keys-format csi-u
 git clone <this-repo-url> ~/clone/path/tmux-agents-session-manager
 ```
 
-Build the bundled daemon once:
+Build the bundled state daemon and history reader once:
 
 ```sh
 cd ~/clone/path/tmux-agents-session-manager
@@ -76,8 +78,8 @@ After publishing/renaming the repo, use the normal tpm form:
 set -g @plugin 'yourname/tmux-agents-session-manager'
 ```
 
-Then press `prefix` + <kbd>I</kbd> and build the daemon from the installed
-plugin directory:
+Then press `prefix` + <kbd>I</kbd> and build the bundled binaries from the
+installed plugin directory:
 
 ```sh
 cd ~/.tmux/plugins/tmux-agents-session-manager
@@ -95,9 +97,17 @@ Inside the picker:
 
 | Key                       | Action                                                                    |
 | ------------------------- | ------------------------------------------------------------------------- |
-| `enter`                   | Jump to the session/pane; managed sessions resume in the popup            |
-| `ctrl-x`                  | Kill a managed session, or send `Ctrl-C` to a manual agent pane           |
-| `↑` / `↓`, type to filter | fzf navigation                                                            |
+| `Tab`                     | Toggle between running sessions/panes and saved conversation history       |
+| `enter`                   | Open a live target, or resume the selected historical conversation         |
+| `ctrl-x`                  | Kill a managed session, or send `Ctrl-C` to a manual agent pane            |
+| `↑` / `↓`, type to filter | fzf navigation                                                             |
+
+History mode reads the native local stores for Pi (`~/.pi/agent/sessions`),
+Codex (`~/.codex/sessions`), and Claude (`~/.claude/projects`). Its preview
+shows recent user/assistant messages. Resuming uses `pi --session <file>`,
+`codex resume <id>`, or `claude --resume <id>` with the corresponding command
+from `@agent_agents`. A selected history record always starts a new numbered
+managed tmux session, even when `@agent_multiple_instances` is `off`.
 
 Sessions marked `done` sort near the top so finished work is easy to find.
 Manual panes are detected when their current tmux command is one of
@@ -272,7 +282,15 @@ set -g @agent_detect_wrappers 'node bun npx npm pnpm yarn'
 set -g @agent_session_prefix 'agent-'
 set -g @agent_popup_width    '90%'
 set -g @agent_popup_height   '90%'
+set -g @agent_history_pi_dir     '~/.pi/agent/sessions'
+set -g @agent_history_codex_dir  '~/.codex'
+set -g @agent_history_claude_dir '~/.claude'
+set -g @agent_history_binary '/path/to/daemon/target/release/tmux-agents-history'
 ```
+
+The history directory options are useful when an agent's local data home is
+customized. The plugin expands a leading `~/`. `@agent_history_binary` defaults
+to the history reader built next to the state daemon.
 
 Daemon/status options:
 
@@ -316,7 +334,10 @@ scripts/daemon.sh reload
   whose current command is in `@agent_detect_commands` (or a configured wrapper
   whose child process matches), reads state for managed sessions, shows a live
   `capture-pane` preview and a per-row tool column, and jumps to the selected
-  session or pane. This is where process discovery happens.
+  session or pane. Pressing `Tab` reloads it with records parsed by the bundled
+  `tmux-agents-history` binary; history previews are plain conversation text and
+  Enter launches the agent's native resume command. This is where process and
+  history discovery happen.
 - The **daemon** owns live state, Claude polling, TTL and animation, and publishes a cache-only zero-fork status segment.
 - Pressing `prefix` + `u` from inside an agent popup first detaches that popup,
   then reopens the picker on the outer tmux client.
