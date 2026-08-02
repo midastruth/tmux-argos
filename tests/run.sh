@@ -339,11 +339,11 @@ TMUX_MOCK_OPTIONS="@agent_history_binary=$MOCK_BIN/history-reader"
 PICKER_NOW=200
 HISTORY_MOCK_ROWS=$'pi\t/tmp/pi.jsonl\tpi-id\t/Users/example/project\t190\tFix auth\ncodex\t/tmp/codex.jsonl\tcodex-id\t/tmp/code\t180\tReview release\nclaude\t/tmp/claude.jsonl\tclaude-id\t/tmp/docs\t170\tUpdate docs'
 out="$(run_bash "scripts/picker.sh --list-mode '$mode_file'")"
-assert_contains 'picker history mode lists Pi conversations' "$out" $'history\t/tmp/pi.jsonl\t📚 history\tproject\t10s\t/Users/example/project\tFix auth\tpi'
+assert_contains 'picker history mode lists Pi conversations' "$out" $'history\t/tmp/pi.jsonl\t📜 history\tproject\t10s\t/Users/example/project\tFix auth\tpi'
 assert_contains 'picker history mode uses the Pi file as resume reference' "$out" $'pi\t\t/Users/example/project\t/tmp/pi.jsonl'
-assert_contains 'picker history mode lists Codex conversations' "$out" $'history\t/tmp/codex.jsonl\t📚 history\tcode\t20s\t/tmp/code\tReview release\tcodex'
+assert_contains 'picker history mode lists Codex conversations' "$out" $'history\t/tmp/codex.jsonl\t📜 history\tcode\t20s\t/tmp/code\tReview release\tcodex'
 assert_contains 'picker history mode uses the Codex id as resume reference' "$out" $'codex\t\t/tmp/code\tcodex-id'
-assert_contains 'picker history mode lists Claude conversations' "$out" $'history\t/tmp/claude.jsonl\t📚 history\tdocs\t30s\t/tmp/docs\tUpdate docs\tclaude'
+assert_contains 'picker history mode lists Claude conversations' "$out" $'history\t/tmp/claude.jsonl\t📜 history\tdocs\t30s\t/tmp/docs\tUpdate docs\tclaude'
 
 run_bash "scripts/picker.sh --toggle-mode '$mode_file'"
 assert_eq 'picker Tab toggle returns history mode to live mode' 'live' "$(<"$mode_file")"
