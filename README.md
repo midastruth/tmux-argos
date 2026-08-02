@@ -1,4 +1,4 @@
-# tmux-agents-session-manager
+# tmux-argos
 
 Run many coding-agent sessions across your projects — [Pi](https://pi.dev),
 [Codex](https://openai.com/codex/), [Claude Code](https://www.anthropic.com/claude-code),
@@ -54,20 +54,20 @@ set -g extended-keys-format csi-u
 ### Manual install
 
 ```sh
-git clone <this-repo-url> ~/clone/path/tmux-agents-session-manager
+git clone <this-repo-url> ~/clone/path/tmux-argos
 ```
 
 Build the bundled state daemon and history reader once:
 
 ```sh
-cd ~/clone/path/tmux-agents-session-manager
+cd ~/clone/path/tmux-argos
 cargo build --release --manifest-path daemon/Cargo.toml
 ```
 
 Add to `~/.tmux.conf`, then reload tmux:
 
 ```tmux
-run-shell ~/clone/path/tmux-agents-session-manager/agents_session_manager.tmux
+run-shell ~/clone/path/tmux-argos/tmux-argos.tmux
 ```
 
 ### tpm
@@ -75,14 +75,14 @@ run-shell ~/clone/path/tmux-agents-session-manager/agents_session_manager.tmux
 After publishing/renaming the repo, use the normal tpm form:
 
 ```tmux
-set -g @plugin 'yourname/tmux-agents-session-manager'
+set -g @plugin 'yourname/tmux-argos'
 ```
 
 Then press `prefix` + <kbd>I</kbd> and build the bundled binaries from the
 installed plugin directory:
 
 ```sh
-cd ~/.tmux/plugins/tmux-agents-session-manager
+cd ~/.tmux/plugins/tmux-argos
 cargo build --release --manifest-path daemon/Cargo.toml
 ```
 
@@ -324,7 +324,7 @@ set -g @agent_popup_height   '90%'
 set -g @agent_history_pi_dir     '~/.pi/agent/sessions'
 set -g @agent_history_codex_dir  '~/.codex'
 set -g @agent_history_claude_dir '~/.claude'
-set -g @agent_history_binary '/path/to/daemon/target/release/tmux-agents-history'
+set -g @agent_history_binary '/path/to/daemon/target/release/tmux-argos-history'
 ```
 
 The history directory options are useful when an agent's local data home is
@@ -349,7 +349,7 @@ set -g @agent_status_anim_frames     '✦ ✷ ✹ ✴'
 set -g @agent_animation_interval_ms  '1000'
 set -g @agent_screen_interval_ms     '1000'
 set -g @agent_state_ttl              '259200'
-set -g @agent_daemon_binary '/path/to/daemon/target/release/tmux-agents-state-daemon'
+set -g @agent_daemon_binary '/path/to/daemon/target/release/tmux-argos-state-daemon'
 ```
 
 The plugin sets `@agent_daemon_binary` to its release build by default. It does
@@ -374,7 +374,7 @@ scripts/daemon.sh reload
   whose child process matches), reads state for managed sessions, shows a live
   `capture-pane` preview and a per-row tool column, and jumps to the selected
   session or pane. Pressing `Tab` reloads it with records parsed by the bundled
-  `tmux-agents-history` binary; history previews are plain conversation text and
+  `tmux-argos-history` binary; history previews are plain conversation text and
   Enter launches the agent's native resume command. This is where process and
   history discovery happen.
 - The **daemon** owns live state, Claude polling, TTL and animation, and publishes a cache-only zero-fork status segment.

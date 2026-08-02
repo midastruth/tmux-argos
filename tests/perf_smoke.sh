@@ -18,7 +18,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_ROOT="${TMPDIR:-/tmp}/tmux-agents-perf.$$"
+TMP_ROOT="${TMPDIR:-/tmp}/tmux-argos-perf.$$"
 MOCK_BIN="$TMP_ROOT/bin"
 mkdir -p "$MOCK_BIN"
 

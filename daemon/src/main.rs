@@ -25,7 +25,7 @@ struct Incoming {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("tmux-agents-state-daemon: {error}");
+        eprintln!("tmux-argos-state-daemon: {error}");
         std::process::exit(1);
     }
 }
@@ -149,7 +149,7 @@ fn runtime_paths(server: &TmuxServerInfo) -> Result<RuntimePaths, String> {
     let root = env::var_os("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(format!("tmux-agents-state-{uid}"));
+        .join(format!("tmux-argos-state-{uid}"));
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     let stem = format!("{hash:016x}");

@@ -35,7 +35,7 @@ picker_mode() {
 if [ -n "${AGENT_HISTORY_BINARY:-}" ]; then
   history_binary="$AGENT_HISTORY_BINARY"
 else
-  history_binary="$(expand_home_path "$(get_tmux_option @agent_history_binary "$ROOT/daemon/target/release/tmux-agents-history")")"
+  history_binary="$(expand_home_path "$(get_tmux_option @agent_history_binary "$ROOT/daemon/target/release/tmux-argos-history")")"
 fi
 export AGENT_HISTORY_BINARY="$history_binary"
 
@@ -427,7 +427,7 @@ open_target() {
 parent_client="${1:-}"
 
 if ! command -v fzf >/dev/null 2>&1; then
-  tmux display-message "tmux-agents-session-manager: fzf is required for the picker"
+  tmux display-message "tmux-argos: fzf is required for the picker"
   exit 0
 fi
 

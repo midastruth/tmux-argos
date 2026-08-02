@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034 # mock configuration variables are consumed by subprocesses
 # shellcheck source-path=SCRIPTDIR
-# Lightweight unit tests for tmux-agents-session-manager.
+# Lightweight unit tests for tmux-argos.
 # No external test framework is required; run with: bash tests/run.sh
 set -u
 # Most tests configure the tmux mock through environment variables. Export new
@@ -9,7 +9,7 @@ set -u
 set -a
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_ROOT="${TMPDIR:-/tmp}/tmux-agents-tests.$$"
+TMP_ROOT="${TMPDIR:-/tmp}/tmux-argos-tests.$$"
 MOCK_BIN="$TMP_ROOT/bin"
 TMUX_LOG="$TMP_ROOT/tmux.log"
 mkdir -p "$MOCK_BIN"
@@ -566,13 +566,13 @@ DAEMON_SNAPSHOT_ROWS=$'agent-pi\037%1\037working\037100\n'
 out="$(run_bash 'scripts/picker.sh --list')"
 assert_contains 'picker prefers authoritative daemon snapshot over recovery mirror' "$out" $'session\tagent-pi\t🟡 working'
 
-# agents_session_manager.tmux status badge fragment publication
+# tmux-argos.tmux status badge fragment publication
 # The entrypoint is an executable bash script (tpm runs it directly), not a
 # sourced library, so invoke it with `bash <file>` rather than run_bash's
 # `. scripts/...` style. It publishes @agent_launch_badge and
 # @agent_summary_badge for the user to place; it never touches status-right.
 run_entrypoint() {
-  (cd "$ROOT" && bash agents_session_manager.tmux)
+  (cd "$ROOT" && bash tmux-argos.tmux)
 }
 
 # The entrypoint publishes placeable fragments and never rewrites status-right.

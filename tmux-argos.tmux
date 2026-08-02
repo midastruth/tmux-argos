@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tmux-agents-session-manager plugin entrypoint.
+# tmux-argos plugin entrypoint.
 set -uo pipefail
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/helpers.sh
@@ -7,7 +7,7 @@ CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 launch_key="$(get_tmux_option @agent_launch_key 'y')"
 list_key="$(get_tmux_option @agent_list_key 'u')"
-daemon_binary="$(get_tmux_option @agent_daemon_binary "$CURRENT_DIR/daemon/target/release/tmux-agents-state-daemon")"
+daemon_binary="$(get_tmux_option @agent_daemon_binary "$CURRENT_DIR/daemon/target/release/tmux-argos-state-daemon")"
 tmux set-option -gq @agent_daemon_binary "$daemon_binary"
 
 launch_menu_q=$(printf '%q' "$CURRENT_DIR/scripts/launch_menu.sh")

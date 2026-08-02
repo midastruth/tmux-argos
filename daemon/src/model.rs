@@ -194,7 +194,7 @@ impl StateCenter {
             expiry_deadline: None,
             screen_deadline: Some(Instant::now()),
             published_summary: None,
-            capture_marker: format!("--tmux-agents-daemon-split-{nanos:016x}--"),
+            capture_marker: format!("--tmux-argos-daemon-split-{nanos:016x}--"),
         }
     }
 
@@ -764,8 +764,7 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
                 let session_attached = fields.next().unwrap_or("0");
                 let window_active = fields.next().unwrap_or("0");
                 let pane_active = fields.next().unwrap_or("0");
-                let visible =
-                    session_attached != "0" && window_active == "1" && pane_active == "1";
+                let visible = session_attached != "0" && window_active == "1" && pane_active == "1";
                 Some(PaneRow {
                     session_name,
                     pane_id,

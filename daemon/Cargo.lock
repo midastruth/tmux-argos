@@ -93,7 +93,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tmux-agents-state-daemon"
+name = "tmux-argos-state-daemon"
 version = "0.1.0"
 dependencies = [
  "libc",
