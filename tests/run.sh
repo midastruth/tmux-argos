@@ -58,6 +58,7 @@ cat >"$MOCK_BIN/fzf" <<'FZF_MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >"$FZF_LOG"
 cat >/dev/null
+printf '%s' "${FZF_MOCK_OUTPUT:-}"
 FZF_MOCK
 chmod +x "$MOCK_BIN/fzf"
 export FZF_LOG
@@ -72,12 +73,12 @@ reset_mocks() {
   : >"$TMUX_LOG"
   : >"$DAEMON_LOG"
   : >"$FZF_LOG"
-  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS HISTORY_MOCK_ROWS
+  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS HISTORY_MOCK_ROWS FZF_MOCK_OUTPUT
   unset TMUX_MOCK_OPTIONS TMUX_MOCK_TARGET_OPTIONS TMUX_MOCK_STATUS_OPTIONS \
     TMUX_MOCK_LIST_SESSIONS TMUX_MOCK_LIST_PANES TMUX_MOCK_LIST_CLIENTS \
     TMUX_MOCK_LIST_PANES_PICKER TMUX_MOCK_LIST_PANES_STATUS \
     TMUX_MOCK_HAS_SESSION TMUX_MOCK_EXISTING_SESSIONS TMUX_MOCK_CURRENT_SESSION \
-    TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE TMUX_MOCK_SERVER_PID \
+    TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_SESSION_ID TMUX_MOCK_PANE_VISIBLE TMUX_MOCK_SERVER_PID \
     TMUX_MOCK_FAIL_TARGETS \
     TMUX_MOCK_FAIL_REFRESH_CLIENT TMUX_MOCK_FAIL_RUN_SHELL \
     TMUX_MOCK_IF_SHELL_RESULT TMUX_MOCK_SHOW_HOOKS \
@@ -381,11 +382,12 @@ export TMUX_MOCK_OPTIONS TMUX_PANE TMUX_MOCK_PANE_SESSION
 run_bash 'scripts/state.sh done' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'state.sh writes pane scoped state' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-assert_contains 'state.sh writes session scoped state for managed sessions' "$log_contents" $'set-option\t-t\tagent-a\t@agent_state\tdone'
+assert_contains 'state.sh writes session scoped state for managed sessions by immutable ID' "$log_contents" $'set-option\t-t\t$1\t@agent_state\tdone'
 daemon_log_contents="$(<"$DAEMON_LOG")"
 assert_contains 'state.sh reports state to daemon' "$daemon_log_contents" '"type":"Report"'
 assert_contains 'state.sh sends a process generation' "$daemon_log_contents" '"process_generation":'
 assert_contains 'state.sh sends a monotonic sequence' "$daemon_log_contents" '"sequence":1'
+assert_contains 'state.sh sends the immutable session ID' "$daemon_log_contents" "\"session_id\":\"\$1\""
 
 reset_mocks
 TMUX_PANE='%1'
@@ -394,7 +396,7 @@ export TMUX_PANE TMUX_MOCK_PANE_SESSION
 run_bash 'scripts/state.sh done' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'state.sh still writes pane scoped state for manual panes' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-assert_not_contains 'state.sh does not pollute manual sessions' "$log_contents" $'set-option\t-t\twork\t@agent_state\tdone'
+assert_not_contains 'state.sh does not pollute manual sessions' "$log_contents" $'set-option\t-t\t$1\t@agent_state\tdone'
 
 reset_mocks
 TMUX_PANE='%1'
@@ -431,7 +433,7 @@ export TMUX_PANE TMUX_MOCK_PANE_SESSION
 run_bash 'scripts/state.sh done' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'state.sh keeps done on unwatched managed pane' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-assert_contains 'state.sh writes session done on unwatched managed pane' "$log_contents" $'set-option\t-t\tagent-a\t@agent_state\tdone'
+assert_contains 'state.sh writes session done on unwatched managed pane by immutable ID' "$log_contents" $'set-option\t-t\t$1\t@agent_state\tdone'
 
 reset_mocks
 TMUX_PANE='%1'
@@ -548,10 +550,11 @@ run_bash 'scripts/event.sh exited-pane %8' >/dev/null
 assert_contains 'event client sends pane Exited' "$(<"$DAEMON_LOG")" '"type":"Exited"'
 
 reset_mocks
-run_bash 'scripts/event.sh exited-sessions agent-one agent-two' >/dev/null
+run_bash "scripts/event.sh exited-sessions '\$11' '\$12'" >/dev/null
 log_contents="$(<"$DAEMON_LOG")"
-assert_contains 'event client batch reports the first exited session' "$log_contents" '"session_name":"agent-one"'
-assert_contains 'event client batch reports the second exited session' "$log_contents" '"session_name":"agent-two"'
+assert_contains 'event client batch reports the first exited session ID' "$log_contents" "\"session_id\":\"\$11\""
+assert_contains 'event client batch reports the second exited session ID' "$log_contents" "\"session_id\":\"\$12\""
+assert_not_contains 'event client no longer reports reusable session names' "$log_contents" '"session_name"'
 assert_eq 'event client batch sends one request per session sequentially' '2' "$(grep -c '^send ' "$DAEMON_LOG")"
 
 reset_mocks
@@ -563,8 +566,8 @@ reset_mocks
 test_session_id="$(printf '$%s' 9)"
 run_bash "scripts/picker.sh --kill session agent-pi '$test_session_id'" >/dev/null
 assert_contains 'picker managed-session kill targets the immutable session ID' "$(<"$TMUX_LOG")" $'kill-session\t-t\t$9'
-assert_contains 'picker managed-session kill reports exit synchronously' "$(<"$DAEMON_LOG")" '"session_name":"agent-pi"'
-assert_not_contains 'picker managed-session kill does not defer a reusable-name exit report' "$(<"$TMUX_LOG")" 'event.sh exited-session agent-pi'
+assert_contains 'picker managed-session kill reports the immutable ID synchronously' "$(<"$DAEMON_LOG")" "\"session_id\":\"\$9\""
+assert_not_contains 'picker managed-session kill does not report the reusable name' "$(<"$DAEMON_LOG")" '"session_name":"agent-pi"'
 
 # ctrl-r bulk kill operates on the exact rows currently matched by fzf. The
 # fzf {*f} placeholder writes every match to this file, including all visible
@@ -598,22 +601,17 @@ assert_contains 'picker bulk kill clears the second managed session by immutable
 assert_not_contains 'picker bulk kill never targets a reusable session name' "$log_contents" $'kill-session\t-t\t=agent-one'
 assert_not_contains 'picker bulk kill ignores matched manual panes' "$log_contents" $'send-keys\t-t\t%9'
 daemon_log_contents="$(<"$DAEMON_LOG")"
-assert_contains 'picker bulk kill synchronously reports the first killed session' "$daemon_log_contents" '"session_name":"agent-one"'
-assert_contains 'picker bulk kill synchronously reports the second killed session' "$daemon_log_contents" '"session_name":"agent-two"'
-assert_not_contains 'picker bulk kill does not defer reusable-name exit reports to tmux' "$log_contents" 'event.sh exited-sessions'
+assert_contains 'picker bulk kill synchronously reports the first killed session ID' "$daemon_log_contents" "\"session_id\":\"\$11\""
+assert_contains 'picker bulk kill synchronously reports the second killed session ID' "$daemon_log_contents" "\"session_id\":\"\$12\""
+assert_not_contains 'picker bulk kill never reports reusable session names' "$daemon_log_contents" '"session_name"'
+assert_not_contains 'picker bulk kill does not defer lifecycle reports to tmux' "$log_contents" 'event.sh exited-sessions'
 assert_contains 'picker bulk kill reports the completed empty-query clear' "$log_contents" 'killed 2 matched session(s), skipped 0 working/blocked'
 
-# A replacement can emit state as soon as the picker action returns. The old
-# session's name-only Exited event must already have completed by then.
-replacement_request='{"type":"Report","tool":"pi","pane_id":"%replacement","process_generation":"new-generation","sequence":1,"state":"idle","session_name":"agent-one"}'
+# Lifecycle reports identify the deleted tmux instance, so a same-name
+# replacement can report concurrently without being confused with its predecessor.
+replacement_request="{\"type\":\"Report\",\"tool\":\"pi\",\"pane_id\":\"%99\",\"process_generation\":\"new-generation\",\"sequence\":1,\"state\":\"idle\",\"session_id\":\"\$99\",\"session_name\":\"agent-one\"}"
 run_bash "scripts/daemon.sh send '$replacement_request'" >/dev/null
-exit_line="$(grep -n '"type":"Exited".*"session_name":"agent-one"' "$DAEMON_LOG" | head -n 1 | cut -d: -f1)"
-replacement_line="$(grep -n '"type":"Report".*"session_name":"agent-one"' "$DAEMON_LOG" | head -n 1 | cut -d: -f1)"
-if [ -n "$exit_line" ] && [ -n "$replacement_line" ] && [ "$exit_line" -lt "$replacement_line" ]; then
-  pass 'picker bulk kill completes Exited reporting before a reused session name can report state'
-else
-  fail 'picker bulk kill completes Exited reporting before a reused session name can report state' "Exited line [$exit_line], replacement line [$replacement_line]"
-fi
+assert_contains 'same-name replacement reports a distinct immutable ID' "$(<"$DAEMON_LOG")" "\"session_id\":\"\$99\",\"session_name\":\"agent-one\""
 
 # A non-empty fzf query passes only its current matches, so sessions outside the
 # filtered result are not considered even if they are otherwise idle.
@@ -652,11 +650,11 @@ printf '%s\n' \
   $'2\tsession\tagent-current-blocked\t🟢 idle   \tcurrent\t1m\t/tmp/current\twaiting\tpi\tidle\t$15\t\tcurrent display' \
   $'2\tsession\tagent-safe\t⚪ unknown\tsafe\t-\t/tmp/safe\tunknown\tpi\t\t$16\t\tsafe display' \
   >"$matched_file"
-DAEMON_SNAPSHOT_ROWS=$'agent-visible-working\037%1\037idle\037100\nagent-current-blocked\037%2\037idle\037100\nagent-current-blocked\037%3\037blocked\037200'
+DAEMON_SNAPSHOT_ROWS=$'agent-visible-working\037$14\037%1\037idle\037100\nrenamed-current\037$15\037%2\037idle\037100\nrenamed-current\037$15\037%3\037blocked\037200'
 run_confirmed_bulk_kill >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_not_contains 'picker bulk kill keeps a session displayed as working' "$log_contents" $'kill-session\t-t\t=agent-visible-working'
-assert_not_contains 'picker bulk kill keeps a session with a current blocked daemon record' "$log_contents" $'kill-session\t-t\t=agent-current-blocked'
+assert_not_contains 'picker bulk kill keeps a session displayed as working' "$log_contents" $'kill-session\t-t\t$14'
+assert_not_contains 'picker bulk kill keeps a renamed session with a current blocked daemon record' "$log_contents" $'kill-session\t-t\t$15'
 assert_contains 'picker bulk kill allows a matched session with unknown state' "$log_contents" $'kill-session\t-t\t$16'
 assert_contains 'picker bulk kill reports protected working and blocked sessions' "$log_contents" 'killed 1 matched session(s), skipped 2 working/blocked'
 
@@ -733,7 +731,7 @@ assert_not_contains 'picker bulk kill kills nothing when daemon state is unavail
 
 reset_mocks
 printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t$21\t\tsafe display' >"$matched_file"
-DAEMON_SNAPSHOT_ROWS=$'agent-safe\037%1\037working\037not-a-timestamp'
+DAEMON_SNAPSHOT_ROWS=$'agent-safe\037$21\037%1\037working\037not-a-timestamp'
 run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails on malformed daemon state' '1' "$rc"
@@ -756,8 +754,8 @@ assert_eq 'picker bulk kill fails when a matched session could not be killed' '1
 assert_contains 'picker bulk kill continues after one tmux kill failure' "$log_contents" $'kill-session\t-t\t$23'
 assert_contains 'picker bulk kill reports the partial failure' "$log_contents" 'killed 1 matched session(s), skipped 0 working/blocked, 1 could not be killed'
 exit_report_log="$(<"$DAEMON_LOG")"
-assert_contains 'picker bulk kill reports successful sessions to the daemon' "$exit_report_log" 'agent-ok'
-assert_not_contains 'picker bulk kill does not report a failed kill as exited' "$exit_report_log" 'agent-fail'
+assert_contains 'picker bulk kill reports successful session IDs to the daemon' "$exit_report_log" "\"session_id\":\"\$23\""
+assert_not_contains 'picker bulk kill does not report a failed kill as exited' "$exit_report_log" "\"session_id\":\"\$22\""
 
 # A lifecycle failure occurs after irreversible tmux operations, so the command
 # returns an explicit boundary error and reports that the kill still completed.
@@ -777,8 +775,16 @@ assert_contains 'picker binds ctrl-r to an interactive confirmation action' "$fz
 assert_not_contains 'picker bulk confirmation is not hidden by execute-silent' "$fzf_arguments" 'ctrl-r:execute-silent('
 assert_contains 'picker bulk binding passes all matched rows through an fzf temporary file' "$fzf_arguments" '--kill-matched {*f}'
 assert_contains 'picker single-session kill passes the immutable session ID' "$fzf_arguments" '--kill {2} {3} {11}'
+assert_contains 'picker preview passes the immutable session ID' "$fzf_arguments" '--preview {2} {3} {9} {11}'
 assert_contains 'picker ctrl-r binding reloads rows after bulk kill' "$fzf_arguments" '+reload('
 assert_contains 'picker header explains confirmation and protected states' "$fzf_arguments" 'confirm bulk kill except working/blocked'
+
+reset_mocks
+FZF_MOCK_OUTPUT=$'2\tsession\tstale-reused-name\t🟢 idle   \tproject\t1m\t/tmp/project\twaiting\tpi\tidle\t$44\t\tdisplay'
+run_bash 'scripts/picker.sh test-client' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'picker opens the selected managed session by immutable ID' "$log_contents" $'attach-session\t-t\t$44'
+assert_not_contains 'picker never opens a same-name replacement' "$log_contents" $'attach-session\t-t\tstale-reused-name'
 
 # A missing daemon snapshot must retain the tmux recovery mirror in the picker.
 reset_mocks
@@ -794,7 +800,7 @@ reset_mocks
 PICKER_NOW=100
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 TMUX_MOCK_LIST_SESSIONS=$'agent-pi\t$1\tdone\t90\t/tmp/project\tpi\tpi\t1'
-DAEMON_SNAPSHOT_ROWS=$'agent-pi\037%1\037working\037100\n'
+DAEMON_SNAPSHOT_ROWS=$'renamed-agent-pi\037$1\037%1\037working\037100\n'
 out="$(run_bash 'scripts/picker.sh --list')"
 assert_contains 'picker prefers authoritative daemon snapshot over recovery mirror' "$out" $'session\tagent-pi\t🟡 working'
 
@@ -822,22 +828,30 @@ reset_mocks
 TMUX_MOCK_SHOW_HOOKS=$'after-kill-pane\nsession-closed'
 run_entrypoint >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_not_contains 'entrypoint skips pane hook without reliable killed-pane identity' "$log_contents" $'set-hook\t-ag\tafter-kill-pane'
-assert_contains 'entrypoint appends supported session lifecycle hook' "$log_contents" $'set-hook\t-ag\tsession-closed'
+assert_not_contains 'entrypoint does not add an unreliable pane lifecycle hook' "$log_contents" $'set-hook\t-ag\tafter-kill-pane'
+assert_not_contains 'entrypoint does not add a name-based session lifecycle hook' "$log_contents" $'set-hook\t-ag\tsession-closed'
 
 reset_mocks
 TMUX_MOCK_SHOW_HOOKS=$'session-closed[0] run-shell "user hook"'
 run_entrypoint >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_contains 'entrypoint appends session lifecycle hook when user hook already exists' "$log_contents" $'set-hook\t-ag\tsession-closed'
+assert_not_contains 'entrypoint preserves unrelated user lifecycle hooks' "$log_contents" $'set-hook\t-gu\tsession-closed[0]'
+
+reset_mocks
+TMUX_MOCK_SHOW_HOOKS="session-closed[3] run-shell \"$ROOT/scripts/event.sh exited-session '#{hook_session_name}'\""
+run_entrypoint >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'entrypoint removes its obsolete name-based lifecycle hook' "$log_contents" $'set-hook\t-gu\tsession-closed[3]'
+assert_not_contains 'entrypoint does not replace it with another unreliable hook' "$log_contents" $'set-hook\t-ag\tsession-closed'
 
 reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_status=off'
 run_entrypoint >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_not_contains 'entrypoint publishes no launch badge when status disabled' "$log_contents" $'set-option	-g	@agent_launch_badge'
-assert_not_contains 'entrypoint publishes no summary badge when status disabled' "$log_contents" $'set-option	-g	@agent_summary_badge'
-assert_not_contains 'entrypoint publishes no detach badge when status disabled' "$log_contents" $'set-option	-g	@agent_detach_badge'
+assert_contains 'entrypoint clears a stale launch badge when status is disabled' "$log_contents" $'set-option\t-g\t@agent_launch_badge\t'
+assert_contains 'entrypoint clears a stale summary badge when status is disabled' "$log_contents" $'set-option\t-g\t@agent_summary_badge\t'
+assert_contains 'entrypoint clears a stale detach badge when status is disabled' "$log_contents" $'set-option\t-g\t@agent_detach_badge\t'
+assert_contains 'entrypoint clears the status cache when status is disabled' "$log_contents" $'set-option\t-g\t@agent_status_cache\t'
 
 # Mouse badges: clickable launch/list ranges plus a MouseDown1Status dispatcher.
 reset_mocks

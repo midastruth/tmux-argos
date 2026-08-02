@@ -15,14 +15,15 @@ pub enum Request {
         process_generation: String,
         sequence: u64,
         state: AgentState,
-        session_name: Option<String>,
+        session_id: String,
+        session_name: String,
     },
     Seen {
         pane_id: Option<String>,
     },
     Exited {
         pane_id: Option<String>,
-        session_name: Option<String>,
+        session_id: Option<String>,
     },
     ReloadConfig,
     Shutdown,
@@ -83,20 +84,27 @@ pub fn validate_request(request: &Request) -> Result<(), String> {
         }
         Ok(())
     }
+    fn session(value: &str) -> Result<(), String> {
+        field("session_id", value)?;
+        if !value.starts_with('$') || !value[1..].bytes().all(|b| b.is_ascii_digit()) {
+            return Err("invalid session_id".into());
+        }
+        Ok(())
+    }
     match request {
         Request::Report {
             tool,
             pane_id,
             process_generation,
+            session_id,
             session_name,
             ..
         } => {
             field("tool", tool)?;
             pane(pane_id)?;
             field("process_generation", process_generation)?;
-            if let Some(value) = session_name {
-                field("session_name", value)?;
-            }
+            session(session_id)?;
+            field("session_name", session_name)?;
         }
         Request::Seen { pane_id } => {
             if pane_id.is_none() {
@@ -108,16 +116,16 @@ pub fn validate_request(request: &Request) -> Result<(), String> {
         }
         Request::Exited {
             pane_id,
-            session_name,
+            session_id,
         } => {
-            if pane_id.is_none() && session_name.is_none() {
-                return Err("Exited needs pane_id or session_name".into());
+            if pane_id.is_none() && session_id.is_none() {
+                return Err("Exited needs pane_id or session_id".into());
             }
             if let Some(value) = pane_id {
                 pane(value)?;
             }
-            if let Some(value) = session_name {
-                field("session_name", value)?;
+            if let Some(value) = session_id {
+                session(value)?;
             }
         }
         _ => {}
@@ -199,7 +207,8 @@ mod tests {
             process_generation: "".into(),
             sequence: 1,
             state: AgentState::Idle,
-            session_name: None,
+            session_id: "$1".into(),
+            session_name: "work".into(),
         };
         assert!(validate_request(&r).is_err());
     }
@@ -212,7 +221,8 @@ mod tests {
             process_generation: "x".repeat(MAX_FIELD_BYTES + 1),
             sequence: 1,
             state: AgentState::Idle,
-            session_name: None,
+            session_id: "$1".into(),
+            session_name: "work".into(),
         };
         assert!(validate_request(&oversized).is_err());
         let delimited = Request::Report {
@@ -221,8 +231,18 @@ mod tests {
             process_generation: "bad\tname".into(),
             sequence: 1,
             state: AgentState::Idle,
-            session_name: None,
+            session_id: "$1".into(),
+            session_name: "work".into(),
         };
         assert!(validate_request(&delimited).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_session_id() {
+        let request = Request::Exited {
+            pane_id: None,
+            session_id: Some("agent-one".into()),
+        };
+        assert!(validate_request(&request).is_err());
     }
 }

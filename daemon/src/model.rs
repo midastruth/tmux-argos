@@ -7,6 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_FRAMES: usize = 64;
 const MAX_FRAME_BYTES: usize = 64;
 const SCREEN_CAPTURE_HISTORY_LINES: &str = "-80";
+const RETIRED_GENERATION_TTL: Duration = Duration::from_secs(300);
+const MAX_RETIRED_GENERATIONS: usize = 4096;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -132,7 +134,8 @@ struct AgentRecord {
     source: Source,
     tool: String,
     pane_id: Option<String>,
-    session_name: Option<String>,
+    session_id: String,
+    session_name: String,
     process_generation: Option<String>,
     sequence: u64,
     state: AgentState,
@@ -148,6 +151,7 @@ enum Source {
 #[derive(Clone, Debug)]
 struct PaneRow {
     session_name: String,
+    session_id: String,
     pane_id: String,
     command: String,
     pane_pid: u32,
@@ -169,7 +173,7 @@ pub struct StateCenter {
     pub server_socket: String,
     config: Config,
     agents: HashMap<String, AgentRecord>,
-    retired_event_generations: HashSet<String>,
+    retired_event_generations: HashMap<String, Instant>,
     frame_index: usize,
     animation_deadline: Option<Instant>,
     expiry_deadline: Option<Instant>,
@@ -188,7 +192,7 @@ impl StateCenter {
             server_socket,
             config,
             agents: HashMap::new(),
-            retired_event_generations: HashSet::new(),
+            retired_event_generations: HashMap::new(),
             frame_index: 0,
             animation_deadline: None,
             expiry_deadline: None,
@@ -199,7 +203,7 @@ impl StateCenter {
     }
 
     pub fn restore_once(&mut self) {
-        let format = "#{session_name}\t#{pane_id}\t#{@agent_tool}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_process_generation}\t#{@agent_sequence}";
+        let format = "#{session_name}\t#{session_id}\t#{pane_id}\t#{@agent_tool}\t#{@agent_state}\t#{@agent_state_at}\t#{@agent_process_generation}\t#{@agent_sequence}";
         let Some(output) = tmux_output(&self.server_socket, &["list-sessions", "-F", format])
         else {
             return;
@@ -216,38 +220,39 @@ impl StateCenter {
 
     fn restore_mirror_row(&mut self, line: &str, managed_only: bool) {
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 7 {
+        if fields.len() < 8 {
             return;
         }
         let managed = fields[0].starts_with(&self.config.prefix);
-        if managed_only != managed || fields[2].is_empty() {
+        if managed_only != managed || fields[1].is_empty() || fields[3].is_empty() {
             return;
         }
-        if is_screen_owned_tool(fields[2]) {
+        if is_screen_owned_tool(fields[3]) {
             return;
         }
-        let Some(state) = parse_state(fields[3]) else {
+        let Some(state) = parse_state(fields[4]) else {
             return;
         };
-        let changed_at = fields[4]
+        let changed_at = fields[5]
             .parse::<u64>()
             .ok()
             .map(|seconds| UNIX_EPOCH + Duration::from_secs(seconds))
             .unwrap_or_else(SystemTime::now);
-        let generation = if fields[5].is_empty() {
-            format!("restore:{}", fields[1])
+        let generation = if fields[6].is_empty() {
+            format!("restore:{}", fields[2])
         } else {
-            fields[5].to_string()
+            fields[6].to_string()
         };
-        let sequence = fields[6].parse().unwrap_or(0);
-        let key = event_key(fields[2], fields[1], &generation);
+        let sequence = fields[7].parse().unwrap_or(0);
+        let key = event_key(fields[3], fields[2], &generation);
         self.agents.insert(
             key,
             AgentRecord {
                 source: Source::Event,
-                tool: fields[2].into(),
-                pane_id: Some(fields[1].into()),
-                session_name: Some(fields[0].into()),
+                tool: fields[3].into(),
+                pane_id: Some(fields[2].into()),
+                session_id: fields[1].into(),
+                session_name: fields[0].into(),
                 process_generation: Some(generation),
                 sequence,
                 state,
@@ -264,6 +269,8 @@ impl StateCenter {
     }
 
     pub fn apply(&mut self, request: Request) -> Result<(), String> {
+        let now = Instant::now();
+        self.prune_retired_generations(now);
         match request {
             Request::Report {
                 tool,
@@ -271,16 +278,17 @@ impl StateCenter {
                 process_generation,
                 sequence,
                 state,
+                session_id,
                 session_name,
             } => {
                 if is_screen_owned_tool(&tool) {
                     return Err(format!("{tool} state is owned by screen detection"));
                 }
                 let key = event_key(&tool, &pane_id, &process_generation);
-                if self.retired_event_generations.contains(&key) {
+                if self.retired_event_generations.contains_key(&key) {
                     return Ok(());
                 }
-                self.remove_reused_pane(&tool, &pane_id, &process_generation);
+                self.remove_reused_pane(&tool, &pane_id, &process_generation, now);
                 if self
                     .agents
                     .get(&key)
@@ -294,6 +302,7 @@ impl StateCenter {
                         source: Source::Event,
                         tool,
                         pane_id: Some(pane_id),
+                        session_id,
                         session_name,
                         process_generation: Some(process_generation),
                         sequence,
@@ -316,26 +325,32 @@ impl StateCenter {
             }
             Request::Exited {
                 pane_id,
-                session_name,
+                session_id,
             } => {
-                for (identity, record) in &self.agents {
-                    let exits_record = pane_id
-                        .as_ref()
-                        .is_some_and(|pane| record.pane_id.as_ref() == Some(pane))
-                        || session_name
+                let retired: Vec<String> = self
+                    .agents
+                    .iter()
+                    .filter(|(_, record)| {
+                        (pane_id
                             .as_ref()
-                            .is_some_and(|session| record.session_name.as_ref() == Some(session));
-                    if exits_record && record.source == Source::Event {
-                        self.retired_event_generations.insert(identity.clone());
-                    }
+                            .is_some_and(|pane| record.pane_id.as_ref() == Some(pane))
+                            || session_id
+                                .as_ref()
+                                .is_some_and(|session| &record.session_id == session))
+                            && record.source == Source::Event
+                    })
+                    .map(|(identity, _)| identity.clone())
+                    .collect();
+                for identity in retired {
+                    self.retire_event_generation(identity, now);
                 }
                 self.agents.retain(|_, record| {
                     !(pane_id
                         .as_ref()
                         .is_some_and(|pane| record.pane_id.as_ref() == Some(pane))
-                        || session_name
+                        || session_id
                             .as_ref()
-                            .is_some_and(|session| record.session_name.as_ref() == Some(session)))
+                            .is_some_and(|session| &record.session_id == session))
                 });
             }
             _ => return Err("command is not a state event".into()),
@@ -343,7 +358,7 @@ impl StateCenter {
         Ok(())
     }
 
-    fn remove_reused_pane(&mut self, tool: &str, pane: &str, generation: &str) {
+    fn remove_reused_pane(&mut self, tool: &str, pane: &str, generation: &str, now: Instant) {
         let reused: Vec<String> = self
             .agents
             .iter()
@@ -357,11 +372,33 @@ impl StateCenter {
             .collect();
         for identity in reused {
             self.agents.remove(&identity);
-            self.retired_event_generations.insert(identity);
+            self.retire_event_generation(identity, now);
         }
     }
 
+    fn retire_event_generation(&mut self, identity: String, now: Instant) {
+        self.retired_event_generations.insert(identity, now);
+        if self.retired_event_generations.len() <= MAX_RETIRED_GENERATIONS {
+            return;
+        }
+        if let Some(oldest) = self
+            .retired_event_generations
+            .iter()
+            .min_by_key(|(_, retired_at)| **retired_at)
+            .map(|(identity, _)| identity.clone())
+        {
+            self.retired_event_generations.remove(&oldest);
+        }
+    }
+
+    fn prune_retired_generations(&mut self, now: Instant) {
+        self.retired_event_generations.retain(|_, retired_at| {
+            now.saturating_duration_since(*retired_at) <= RETIRED_GENERATION_TTL
+        });
+    }
+
     pub fn process_deadlines(&mut self, now: Instant) {
+        self.prune_retired_generations(now);
         if self
             .animation_deadline
             .is_some_and(|deadline| deadline <= now)
@@ -395,6 +432,7 @@ impl StateCenter {
         let Some(rows) = list_pane_rows(&self.server_socket) else {
             return;
         };
+        self.remove_exited_records(&rows, Instant::now());
         let mut process_table: Option<Option<String>> = None;
         let mut resolved = Vec::new();
         for row in rows {
@@ -436,10 +474,7 @@ impl StateCenter {
             let previous = self.agents.get(&key);
             let state = self.screen_display_state(previous, detection.state, row.visible);
             let changed_at = previous
-                .filter(|record| {
-                    record.state == state
-                        && record.session_name.as_deref() == Some(row.session_name.as_str())
-                })
+                .filter(|record| record.state == state && record.session_id == row.session_id)
                 .map(|record| record.changed_at)
                 .unwrap_or_else(SystemTime::now);
             self.agents.insert(
@@ -448,7 +483,8 @@ impl StateCenter {
                     source: Source::Screen,
                     tool,
                     pane_id: Some(row.pane_id),
-                    session_name: Some(row.session_name),
+                    session_id: row.session_id,
+                    session_name: row.session_name,
                     process_generation: None,
                     sequence: 0,
                     state,
@@ -459,6 +495,33 @@ impl StateCenter {
 
         self.agents
             .retain(|key, record| record.source != Source::Screen || active_keys.contains(key));
+    }
+
+    fn remove_exited_records(&mut self, rows: &[PaneRow], now: Instant) {
+        let live_panes: HashSet<&str> = rows.iter().map(|row| row.pane_id.as_str()).collect();
+        let live_sessions: HashSet<&str> = rows.iter().map(|row| row.session_id.as_str()).collect();
+        let exited: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|(_, record)| {
+                !live_sessions.contains(record.session_id.as_str())
+                    || !record
+                        .pane_id
+                        .as_deref()
+                        .is_some_and(|pane| live_panes.contains(pane))
+            })
+            .map(|(identity, _)| identity.clone())
+            .collect();
+
+        for identity in exited {
+            if self
+                .agents
+                .remove(&identity)
+                .is_some_and(|record| record.source == Source::Event)
+            {
+                self.retire_event_generation(identity, now);
+            }
+        }
     }
 
     fn resolve_screen_tool(
@@ -656,6 +719,7 @@ impl StateCenter {
                     "identity": identity,
                     "tool": record.tool,
                     "paneId": record.pane_id,
+                    "sessionId": record.session_id,
                     "sessionName": record.session_name,
                     "state": state_label(record.state),
                     "changedAt": record.changed_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
@@ -748,7 +812,7 @@ fn tmux_output(server_socket: &str, args: &[&str]) -> Option<String> {
 }
 
 fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
-    let format = "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}\t#{@agent_tool}\t#{session_attached}\t#{window_active}\t#{pane_active}";
+    let format = "#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}\t#{@agent_tool}\t#{session_attached}\t#{window_active}\t#{pane_active}";
     let output = tmux_output(server_socket, &["list-panes", "-a", "-F", format])?;
     Some(
         output
@@ -756,6 +820,7 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
             .filter_map(|line| {
                 let mut fields = line.split('\t');
                 let session_name = fields.next()?.to_string();
+                let session_id = fields.next()?.to_string();
                 let pane_id = fields.next()?.to_string();
                 let command = fields.next()?.to_string();
                 let pane_pid = fields.next()?.parse::<u32>().ok()?;
@@ -767,6 +832,7 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
                 let visible = session_attached != "0" && window_active == "1" && pane_active == "1";
                 Some(PaneRow {
                     session_name,
+                    session_id,
                     pane_id,
                     command,
                     pane_pid,
@@ -1200,7 +1266,7 @@ mod tests {
     #[test]
     fn startup_restore_accepts_manual_pi_mirrors() {
         let mut state = center();
-        state.restore_mirror_row("work\t%2\tpi\tdone\t123\tmanual-generation\t7", false);
+        state.restore_mirror_row("work\t$1\t%2\tpi\tdone\t123\tmanual-generation\t7", false);
         assert_eq!(state.agents.len(), 1);
         let restored = state.agents.values().next().unwrap();
         assert_eq!(restored.pane_id.as_deref(), Some("%2"));
@@ -1211,7 +1277,7 @@ mod tests {
     #[test]
     fn startup_restore_ignores_screen_owned_codex_mirrors() {
         let mut state = center();
-        state.restore_mirror_row("work\t%2\tcodex\tdone\t123\tg\t7", false);
+        state.restore_mirror_row("work\t$1\t%2\tcodex\tdone\t123\tg\t7", false);
         assert!(state.agents.is_empty());
     }
 
@@ -1225,7 +1291,8 @@ mod tests {
             source: Source::Screen,
             tool: "codex".into(),
             pane_id: Some("%1".into()),
-            session_name: Some("work".into()),
+            session_id: "$1".into(),
+            session_name: "work".into(),
             process_generation: None,
             sequence: 0,
             state: AgentState::Working,
@@ -1251,7 +1318,8 @@ mod tests {
                 process_generation: "g".into(),
                 sequence: 2,
                 state: AgentState::Working,
-                session_name: None,
+                session_id: "$1".into(),
+                session_name: "work".into(),
             })
             .unwrap();
         state
@@ -1261,7 +1329,8 @@ mod tests {
                 process_generation: "g".into(),
                 sequence: 1,
                 state: AgentState::Done,
-                session_name: None,
+                session_id: "$1".into(),
+                session_name: "work".into(),
             })
             .unwrap();
         assert_eq!(
@@ -1279,7 +1348,8 @@ mod tests {
             process_generation: "g".into(),
             sequence: 1,
             state: AgentState::Working,
-            session_name: None,
+            session_id: "$1".into(),
+            session_name: "work".into(),
         });
         assert!(result.is_err());
         assert!(state.agents.is_empty());
@@ -1296,7 +1366,8 @@ mod tests {
                     process_generation: generation.into(),
                     sequence: 1,
                     state: AgentState::Idle,
-                    session_name: None,
+                    session_id: "$1".into(),
+                    session_name: "work".into(),
                 })
                 .unwrap();
         }
@@ -1307,7 +1378,8 @@ mod tests {
                 process_generation: "a".into(),
                 sequence: 2,
                 state: AgentState::Done,
-                session_name: None,
+                session_id: "$1".into(),
+                session_name: "work".into(),
             })
             .unwrap();
         assert_eq!(state.agents.len(), 1);
@@ -1333,7 +1405,8 @@ mod tests {
                 process_generation: "g".into(),
                 sequence: 1,
                 state: AgentState::Done,
-                session_name: None,
+                session_id: "$1".into(),
+                session_name: "work".into(),
             })
             .unwrap();
         state
@@ -1345,6 +1418,96 @@ mod tests {
             state.agents.values().next().unwrap().state,
             AgentState::Idle
         );
+    }
+
+    #[test]
+    fn session_exit_does_not_remove_same_name_replacement() {
+        let mut state = center();
+        for (pane, generation, session_id) in [("%1", "old", "$1"), ("%2", "new", "$2")] {
+            state
+                .apply(Request::Report {
+                    tool: "pi".into(),
+                    pane_id: pane.into(),
+                    process_generation: generation.into(),
+                    sequence: 1,
+                    state: AgentState::Working,
+                    session_id: session_id.into(),
+                    session_name: "agent-reused".into(),
+                })
+                .unwrap();
+        }
+
+        state
+            .apply(Request::Exited {
+                pane_id: None,
+                session_id: Some("$1".into()),
+            })
+            .unwrap();
+        state
+            .apply(Request::Report {
+                tool: "pi".into(),
+                pane_id: "%2".into(),
+                process_generation: "new".into(),
+                sequence: 2,
+                state: AgentState::Done,
+                session_id: "$2".into(),
+                session_name: "agent-reused".into(),
+            })
+            .unwrap();
+
+        assert_eq!(state.agents.len(), 1);
+        let replacement = state.agents.values().next().unwrap();
+        assert_eq!(replacement.session_id, "$2");
+        assert_eq!(replacement.state, AgentState::Done);
+    }
+
+    #[test]
+    fn live_reconciliation_removes_only_the_exited_session_instance() {
+        let mut state = center();
+        for (pane, generation, session_id) in [("%1", "old", "$1"), ("%2", "new", "$2")] {
+            state
+                .apply(Request::Report {
+                    tool: "pi".into(),
+                    pane_id: pane.into(),
+                    process_generation: generation.into(),
+                    sequence: 1,
+                    state: AgentState::Working,
+                    session_id: session_id.into(),
+                    session_name: "agent-reused".into(),
+                })
+                .unwrap();
+        }
+        let replacement = PaneRow {
+            session_name: "agent-reused".into(),
+            session_id: "$2".into(),
+            pane_id: "%2".into(),
+            command: "pi".into(),
+            pane_pid: 2,
+            pane_title: String::new(),
+            configured_tool: "pi".into(),
+            visible: false,
+        };
+
+        state.remove_exited_records(&[replacement], Instant::now());
+
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents.values().next().unwrap().session_id, "$2");
+    }
+
+    #[test]
+    fn retired_generations_are_bounded_and_expire() {
+        let mut state = center();
+        let now = Instant::now();
+        for index in 0..(MAX_RETIRED_GENERATIONS + 100) {
+            state.retire_event_generation(format!("event:{index}"), now);
+        }
+        assert_eq!(
+            state.retired_event_generations.len(),
+            MAX_RETIRED_GENERATIONS
+        );
+
+        state.prune_retired_generations(now + RETIRED_GENERATION_TTL + Duration::from_secs(1));
+        assert!(state.retired_event_generations.is_empty());
     }
 
     #[test]

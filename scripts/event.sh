@@ -25,18 +25,18 @@ seen-pane)
   ;;
 exited-pane)
   [ -n "${2:-}" ] || exit 1
-  request="{\"type\":\"Exited\",\"pane_id\":$(json_string "$2"),\"session_name\":null}"
+  request="{\"type\":\"Exited\",\"pane_id\":$(json_string "$2"),\"session_id\":null}"
   ;;
 exited-session)
-  [ -n "${2:-}" ] || exit 1
-  request="{\"type\":\"Exited\",\"pane_id\":null,\"session_name\":$(json_string "$2")}"
+  [[ "${2:-}" =~ ^\$[0-9]+$ ]] || exit 1
+  request="{\"type\":\"Exited\",\"pane_id\":null,\"session_id\":$(json_string "$2")}"
   ;;
 exited-sessions)
   shift
   [ "$#" -gt 0 ] || exit 1
-  for session in "$@"; do
-    [ -n "$session" ] || exit 1
-    request="{\"type\":\"Exited\",\"pane_id\":null,\"session_name\":$(json_string "$session")}"
+  for session_id in "$@"; do
+    [[ "$session_id" =~ ^\$[0-9]+$ ]] || exit 1
+    request="{\"type\":\"Exited\",\"pane_id\":null,\"session_id\":$(json_string "$session_id")}"
     send_request "$request" || exit 1
   done
   exit 0

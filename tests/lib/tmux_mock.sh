@@ -21,6 +21,7 @@
 #   TMUX_MOCK_EXISTING_SESSIONS space-separated session names that exist
 #   TMUX_MOCK_CURRENT_SESSION  session name for '#S' display-message formats
 #   TMUX_MOCK_PANE_SESSION     session name for '#{session_name}' formats
+#   TMUX_MOCK_PANE_SESSION_ID  session ID for '#{session_id}' formats
 #   TMUX_MOCK_PANE_VISIBLE     output for '#{session_attached}' formats
 #   TMUX_MOCK_FAIL_TARGETS     space-separated targets whose -t queries fail,
 #                              including kill-session
@@ -166,6 +167,8 @@ run_group() {
         printf '__agent_pane__ %s %s' "${target:-}" "${TMUX_MOCK_PANE_VISIBLE:-0 0 0}"
       elif [[ "$joined" == *'#{session_attached}'* ]]; then
         printf '%s' "${TMUX_MOCK_PANE_VISIBLE:-0 0 0}"
+      elif [[ "$joined" == *'#{session_id}'* && "$joined" == *'#{session_name}'* ]]; then
+        printf '%s\t%s' "${TMUX_MOCK_PANE_SESSION_ID:-\$1}" "${TMUX_MOCK_PANE_SESSION:-${TMUX_MOCK_CURRENT_SESSION:-}}"
       elif [[ "$joined" == *'#{session_name}'* ]]; then
         printf '%s' "${TMUX_MOCK_PANE_SESSION:-${TMUX_MOCK_CURRENT_SESSION:-}}"
       elif [[ "$joined" == *'#{pid}'* ]]; then

@@ -124,10 +124,12 @@ picker row does not have the complete expected schema, the bulk kill aborts
 without killing anything. `idle`, `done`, and `unknown` matched sessions are
 eligible.
 
-Each matched managed row also carries tmux's immutable `session_id`. Deletion
-targets that ID rather than the reusable display name. If the original session
-exits while confirmation is open and another client creates a new session with
-the same name, the old ID no longer resolves and the replacement is not killed.
+Each managed row also carries tmux's immutable `session_id`. Opening, preview,
+state protection, deletion, and lifecycle reporting all use that ID rather than
+the reusable display name. If the original session exits while the picker is
+open and another client creates a new session with the same name, actions still
+refer only to the original tmux instance. Renaming a session also does not bypass
+its current `working`/`blocked` protection.
 
 Manual Agent panes and history rows are ignored because they are not managed
 live sessions. Successful kills are reported to the daemon synchronously before
@@ -180,7 +182,8 @@ daemon from their tmux pane process, terminal title, and captured screen text.
 
 A single-thread-owned Rust daemon is the authoritative runtime state center for
 each tmux server. It uses a private mode-0600 Unix socket, restores Pi mirror
-options once at startup, accepts Pi lifecycle events, and periodically applies
+options once at startup, accepts Pi lifecycle events keyed by immutable tmux
+session IDs, and periodically applies
 Herdr-style screen detection for Codex and Claude. The Pi extension and
 `scripts/state.sh` continue writing tmux mirror options so the daemon can recover
 after restart and the picker can display reliable state if a daemon snapshot is
@@ -194,8 +197,11 @@ temporarily unavailable.
 | turn end while watched | `idle` |
 
 Opening a `done` pane sends `Seen`; `done` remains until then. `working` and
-`blocked` expire after `@agent_state_ttl`. Managed-session exits are sent by
-picker actions and an appended `session-closed` tmux hook when available.
+`blocked` expire after `@agent_state_ttl`. Picker-initiated exits carry
+`session_id`, so a delayed event cannot clear a
+same-name replacement. For exits initiated elsewhere, the daemon reconciles
+records against the live tmux pane and session IDs on its regular scan; tmux's
+`session-closed` hook is not used because it exposes only the reusable name.
 `after-kill-pane` is intentionally not used because tmux does not expose the
 removed pane identity there. Existing hooks are never overwritten.
 
@@ -334,7 +340,8 @@ The plugin binds `MouseDown1Status` and dispatches only its own ranges; clicks
 elsewhere on the status line fall back to tmux's default `switch-client`. The
 range markers add no `#()` expansion, so referencing the fragments stays
 zero-fork. Set `@agent_status_mouse off` to publish the fragments without the
-clickable ranges.
+clickable ranges. Setting `@agent_status off` and reloading the plugin clears all
+previously published badge fragments and the cached summary.
 
 ## Options
 
@@ -390,6 +397,14 @@ not install a toolchain or build code during tmux startup. Plugin reload sends
 ```sh
 scripts/daemon.sh snapshot
 scripts/daemon.sh reload
+```
+
+After rebuilding the daemon binary while the same tmux server is still running,
+restart that daemon process, then reload the plugin entrypoint:
+
+```sh
+scripts/daemon.sh shutdown
+tmux run-shell /path/to/tmux-argos/tmux-argos.tmux
 ```
 
 ## How it works

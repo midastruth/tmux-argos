@@ -57,7 +57,8 @@ initialize_live_config() {
 # only the dependency required by the selected preview kind.
 [ "${1:-}" = '--preview' ] && {
   case "${2:-}" in
-  session|pane) tmux capture-pane -ept "${3:-}" ;;
+  session) tmux capture-pane -ept "${5:-}" ;;
+  pane) tmux capture-pane -ept "${3:-}" ;;
   history)
     initialize_history_binary
     "$history_binary" preview "${4:-}" "${3:-}" 2>&1
@@ -77,12 +78,12 @@ daemon_records=''
 # variables instead of stdout avoids one command-substitution fork per picker
 # row, which dominates rendering cost on large workspaces.
 lookup_daemon_state() {
-  local kind="$1" target="$2" record_session record_pane record_state record_changed
+  local kind="$1" target="$2" _record_session record_session_id record_pane record_state record_changed
   daemon_state=''
   daemon_at=''
-  while IFS=$'\037' read -r record_session record_pane record_state record_changed; do
+  while IFS=$'\037' read -r _record_session record_session_id record_pane record_state record_changed; do
     [ -n "$record_state" ] || continue
-    if { [ "$kind" = session ] && [ "$record_session" = "$target" ]; } ||
+    if { [ "$kind" = session ] && [ "$record_session_id" = "$target" ]; } ||
       { [ "$kind" = pane ] && [ "$record_pane" = "$target" ]; }; then
       daemon_state="$record_state"
       daemon_at="$record_changed"
@@ -170,7 +171,7 @@ emit_managed_rows() {
     while IFS=$'\t' read -r s session_id state at path tool cmd instance; do
       is_managed_session "$s" || continue
       name=${path##*/}
-      if lookup_daemon_state session "$s"; then
+      if lookup_daemon_state session "$session_id"; then
         state="$daemon_state"
         at="$daemon_at"
       fi
@@ -350,9 +351,9 @@ kill_target() {
     if ! tmux kill-session -t "$session_id" 2>/dev/null; then
       return 1
     fi
-    # Complete the name-based exit report before this picker becomes
-    # interactive again, keeping its next launch behind the lifecycle update.
-    if ! "$DIR/event.sh" exited-session "$target" >/dev/null 2>&1; then
+    # Complete the immutable-ID exit report before this picker becomes
+    # interactive again so daemon state cannot outlive the deleted session.
+    if ! "$DIR/event.sh" exited-session "$session_id" >/dev/null 2>&1; then
       # The tmux kill is irreversible, so this boundary can only report the
       # lifecycle failure rather than roll back or retry without a bound.
       tmux display-message 'tmux-argos: session killed, but daemon exit report failed'
@@ -367,17 +368,17 @@ kill_target() {
   esac
 }
 
-# report_session_exits <newline-separated-sessions>
+# report_session_exits <newline-separated-session-ids>
 # Reports a completed bulk kill synchronously and sequentially before this fzf
 # instance returns interactive control.
 report_session_exits() {
-  local sessions="$1" session
+  local session_ids="$1" session_id
   local -a event_arguments=()
-  [ -n "$sessions" ] || return 0
-  while IFS= read -r session; do
-    [ -n "$session" ] || continue
-    event_arguments+=("$session")
-  done <<< "$sessions"
+  [ -n "$session_ids" ] || return 0
+  while IFS= read -r session_id; do
+    [ -n "$session_id" ] || continue
+    event_arguments+=("$session_id")
+  done <<< "$session_ids"
   [ "${#event_arguments[@]}" -gt 0 ] || return 0
   "$DIR/event.sh" exited-sessions "${event_arguments[@]}" >/dev/null 2>&1
 }
@@ -391,7 +392,7 @@ report_session_exits() {
 kill_matched_sessions() {
   local matched_file="$1" matched_session_rows matched_session_count confirmation_reply
   local daemon_records validated_targets marker
-  local killed failed skipped lifecycle_report_failed killed_sessions session session_id protected
+  local killed failed skipped lifecycle_report_failed killed_session_ids session session_id protected
 
   if [ -z "$matched_file" ] || [ ! -r "$matched_file" ]; then
     tmux display-message 'tmux-argos: matched picker rows could not be read; bulk kill aborted'
@@ -450,8 +451,9 @@ kill_matched_sessions() {
   fi
 
   # Preserve fzf order and de-duplicate session rows while joining the match set
-  # with the current daemon snapshot. Any working/blocked record protects the
-  # whole session. Malformed daemon output aborts this destructive operation.
+  # with the current daemon snapshot by immutable session ID. Any working/blocked
+  # record protects the whole session. Malformed daemon output aborts this
+  # destructive operation.
   marker='__tmux_argos_daemon_rows__'
   if ! validated_targets="$({
     printf '%s\n' "$matched_session_rows"
@@ -478,13 +480,12 @@ kill_matched_sessions() {
         next
       }
       field_count = split($0, daemon, "\037")
-      if (field_count < 4 || daemon[3] !~ /^(idle|done|working|blocked)$/ || daemon[4] !~ /^[0-9]+$/) {
+      if (field_count != 5 || daemon[2] !~ /^\$[0-9]+$/ || daemon[4] !~ /^(idle|done|working|blocked)$/ || daemon[5] !~ /^[0-9]+$/) {
         invalid_daemon_row = 1
         next
       }
-      session = daemon[1]
-      if (session != "" && (daemon[3] == "working" || daemon[3] == "blocked")) {
-        protected_names[session] = 1
+      if (daemon[4] == "working" || daemon[4] == "blocked") {
+        protected[daemon[2]] = 1
       }
     }
     END {
@@ -494,7 +495,7 @@ kill_matched_sessions() {
       for (order_index = 1; order_index <= count; order_index++) {
         session_id = ordered[order_index]
         session = names[session_id]
-        is_protected = ((session_id in protected) || (session in protected_names)) ? 1 : 0
+        is_protected = (session_id in protected) ? 1 : 0
         print session "\t" session_id "\t" is_protected
       }
     }
@@ -506,7 +507,7 @@ kill_matched_sessions() {
   killed=0
   failed=0
   skipped=0
-  killed_sessions=''
+  killed_session_ids=''
   while IFS=$'\t' read -r session session_id protected; do
     [ -n "$session" ] || continue
     if [ "$protected" = 1 ]; then
@@ -515,10 +516,10 @@ kill_matched_sessions() {
     fi
     if tmux kill-session -t "$session_id" 2>/dev/null; then
       killed=$((killed + 1))
-      if [ -n "$killed_sessions" ]; then
-        killed_sessions+=$'\n'
+      if [ -n "$killed_session_ids" ]; then
+        killed_session_ids+=$'\n'
       fi
-      killed_sessions+="$session"
+      killed_session_ids+="$session_id"
     else
       failed=$((failed + 1))
     fi
@@ -528,7 +529,7 @@ kill_matched_sessions() {
   # boundary error, but do not return control until the bounded report attempt
   # completes.
   lifecycle_report_failed=0
-  if ! report_session_exits "$killed_sessions"; then
+  if ! report_session_exits "$killed_session_ids"; then
     lifecycle_report_failed=1
   fi
   if [ "$failed" -gt 0 ]; then
@@ -545,6 +546,7 @@ kill_matched_sessions() {
 
 open_session_target() {
   local target="$1" origin parent
+  [[ "$target" =~ ^\$[0-9]+$ ]] || return 1
   # Move the underlying parent client to the session's origin window (best-effort),
   # then resume the session in THIS popup over it. Falls back to resuming over the
   # current window when origin/parent are unknown.
@@ -586,9 +588,9 @@ open_history_target() {
 }
 
 open_target() {
-  local kind="$1" target="$2" tool="${3:-}" cwd="${4:-}" resume="${5:-}"
+  local kind="$1" target="$2" tool="${3:-}" cwd="${4:-}" resume="${5:-}" session_id="${6:-}"
   case "$kind" in
-  session) open_session_target "$target" ;;
+  session) open_session_target "$session_id" ;;
   pane) open_pane_target "$target" ;;
   history) open_history_target "$target" "$tool" "$cwd" "$resume" ;;
   esac
@@ -652,7 +654,7 @@ export FZF_DEFAULT_OPTS=''
 header='Agent sessions · Tab: live/history · enter: open/resume · ctrl-x: kill live target · ctrl-r: confirm bulk kill except working/blocked'
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=13 \
   --reverse --cycle --header="$header" \
-  --preview="$self_cmd --preview {2} {3} {9}" --preview-window='right,62%,wrap' \
+  --preview="$self_cmd --preview {2} {3} {9} {11}" --preview-window='right,62%,wrap' \
   --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3} {11})+reload($self_cmd --list-mode $mode_file_q),ctrl-r:execute($self_cmd --kill-matched {*f})+reload($self_cmd --list-mode $mode_file_q)")
 
 [ -z "$sel" ] && exit 0
@@ -661,5 +663,6 @@ target="$(printf '%s' "$sel" | cut -f3)"
 tool="$(printf '%s' "$sel" | cut -f9)"
 history_cwd="$(printf '%s' "$sel" | cut -f11)"
 resume_ref="$(printf '%s' "$sel" | cut -f12)"
+session_id="$(printf '%s' "$sel" | cut -f11)"
 
-open_target "$kind" "$target" "$tool" "$history_cwd" "$resume_ref"
+open_target "$kind" "$target" "$tool" "$history_cwd" "$resume_ref" "$session_id"

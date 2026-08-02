@@ -83,6 +83,10 @@ fn print_picker_snapshot(response: Response) -> Result<(), String> {
             .get("sessionName")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
+        let session_id = record
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         let pane = record
             .get("paneId")
             .and_then(serde_json::Value::as_str)
@@ -95,7 +99,7 @@ fn print_picker_snapshot(response: Response) -> Result<(), String> {
             .get("changedAt")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
-        println!("{session}\u{1f}{pane}\u{1f}{state}\u{1f}{changed_at}");
+        println!("{session}\u{1f}{session_id}\u{1f}{pane}\u{1f}{state}\u{1f}{changed_at}");
     }
     Ok(())
 }

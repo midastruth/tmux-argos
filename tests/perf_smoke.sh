@@ -117,7 +117,7 @@ measure() {
 
 build_case() {
   local n="$1" now sessions='' panes_status='' panes_picker='' opts='' daemon_rows=''
-  local i state tool cmd path session_id pane manual_state
+  local i state tool cmd path session_id pane manual_state manual_session_id
   now="$(date +%s)"
   for i in $(seq 1 "$n"); do
     case $((i % 4)) in
@@ -134,7 +134,7 @@ build_case() {
     path="/tmp/project-$i"
     session_id="\$$i"
     sessions+="agent-$tool-$i	$session_id	$state	$now	$path	$tool	$cmd"$'\n'
-    daemon_rows+="agent-$tool-$i"$'\037'"%m$i"$'\037'"$state"$'\037'"$now"$'\n'
+    daemon_rows+="agent-$tool-$i"$'\037'"$session_id"$'\037'"%m$i"$'\037'"$state"$'\037'"$now"$'\n'
 
     pane="%$i"
     manual_state="$state"
@@ -142,7 +142,8 @@ build_case() {
     panes_picker+="work-$i	$pane	$cmd	$((1000 + i))	/tmp/manual-$i"$'\n'
     opts+="$pane|@agent_state=$manual_state"$'\n'
     opts+="$pane|@agent_state_at=$now"$'\n'
-    daemon_rows+="work-$i"$'\037'"$pane"$'\037'"$manual_state"$'\037'"$now"$'\n'
+    manual_session_id="\$$((n + i))"
+    daemon_rows+="work-$i"$'\037'"$manual_session_id"$'\037'"$pane"$'\037'"$manual_state"$'\037'"$now"$'\n'
   done
 
   export TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-\n@agent_detect_commands=pi codex claude\n@agent_detect_wrappers=node bun npx npm pnpm yarn'

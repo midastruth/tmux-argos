@@ -8,8 +8,12 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_SESSION_PREFIX = "agent-";
 const processGeneration = randomUUID();
 let sequence = 0;
-let tmuxSession: string | undefined;
 let sessionPrefix: string | undefined;
+
+type TmuxSessionIdentity = {
+  id: string;
+  name: string;
+};
 
 function runTmux(args: string[]): string | undefined {
   try {
@@ -33,16 +37,29 @@ function daemonBinary(): string | undefined {
   }
 }
 
-function currentTmuxSession(): string | undefined {
-  if (tmuxSession) {
-    return tmuxSession;
-  }
+function currentTmuxSession(): TmuxSessionIdentity | undefined {
   const pane = process.env.TMUX_PANE;
   if (!pane) {
     return undefined;
   }
-  tmuxSession = runTmux(["display-message", "-p", "-t", pane, "#{session_name}"]);
-  return tmuxSession;
+  const output = runTmux([
+    "display-message",
+    "-p",
+    "-t",
+    pane,
+    "#{session_id}\t#{session_name}",
+  ]);
+  if (!output) {
+    return undefined;
+  }
+  const separator = output.indexOf("\t");
+  if (separator <= 0 || separator === output.length - 1) {
+    return undefined;
+  }
+  return {
+    id: output.slice(0, separator),
+    name: output.slice(separator + 1),
+  };
 }
 
 function managedSessionPrefix(): string {
@@ -101,18 +118,18 @@ function report(state: "blocked" | "working" | "done" | "idle"): void {
     processGeneration,
   ]);
   addMirrorCommand(["set-option", "-p", "-t", pane, "@agent_sequence", sequence.toString()]);
-  if (session?.startsWith(managedSessionPrefix())) {
-    addMirrorCommand(["set-option", "-t", session, "@agent_state", state]);
-    addMirrorCommand(["set-option", "-t", session, "@agent_state_at", now]);
+  if (session.name.startsWith(managedSessionPrefix())) {
+    addMirrorCommand(["set-option", "-t", session.id, "@agent_state", state]);
+    addMirrorCommand(["set-option", "-t", session.id, "@agent_state_at", now]);
     addMirrorCommand([
       "set-option",
       "-t",
-      session,
+      session.id,
       "@agent_process_generation",
       processGeneration,
     ]);
-    addMirrorCommand(["set-option", "-t", session, "@agent_sequence", sequence.toString()]);
-    addMirrorCommand(["set-option", "-t", session, "@agent_pane", pane]);
+    addMirrorCommand(["set-option", "-t", session.id, "@agent_sequence", sequence.toString()]);
+    addMirrorCommand(["set-option", "-t", session.id, "@agent_pane", pane]);
   }
   runTmux(mirrorCommands);
 
@@ -127,7 +144,8 @@ function report(state: "blocked" | "working" | "done" | "idle"): void {
     process_generation: processGeneration,
     sequence,
     state,
-    session_name: session,
+    session_id: session.id,
+    session_name: session.name,
   });
   try {
     execFileSync(binary, ["send", request], { stdio: "ignore" });

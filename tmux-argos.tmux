@@ -48,6 +48,12 @@ if [ "$status_enabled" = on ]; then
     # show a misleading close glyph, so publish it empty.
     tmux set-option -g @agent_detach_badge ''
   fi
+else
+  # A reload must remove fragments published by an earlier enabled run.
+  tmux set-option -g @agent_launch_badge ''
+  tmux set-option -g @agent_summary_badge ''
+  tmux set-option -g @agent_detach_badge ''
+  tmux set-option -g @agent_status_cache ''
 fi
 
 # Left-clicking the launch/list badges routes to the same scripts as the
@@ -66,17 +72,18 @@ else
   tmux bind-key -T root MouseDown1Status switch-client -t =
 fi
 
-# Hook support differs by tmux release. Append only hooks advertised by this
-# server; never replace user hooks. tmux 3.6 exposes no killed-pane identity to
-# after-kill-pane, so only session-closed can provide a reliable exit target.
-event_q=$(printf '%q' "$CURRENT_DIR/scripts/event.sh")
-available_hooks="$(tmux show-hooks -g 2>/dev/null || true)"
-if printf '%s\n' "$available_hooks" | grep -Eq '^session-closed($|\[|[[:space:]])'; then
-  existing_hook="$(tmux show-hooks -g session-closed 2>/dev/null || true)"
-  if [[ "$existing_hook" != *"$CURRENT_DIR/scripts/event.sh"* ]]; then
-    tmux set-hook -ag session-closed "run-shell \"$event_q exited-session '#{hook_session_name}'\""
+# tmux's session-closed hook exposes only the reusable session name, not the
+# immutable session ID. The daemon reconciles its records against live pane and
+# session IDs instead. Remove obsolete hooks owned by this checkout without
+# touching user hooks.
+existing_hook="$(tmux show-hooks -g session-closed 2>/dev/null || true)"
+while IFS= read -r hook_line; do
+  if [[ "$hook_line" == session-closed\[* ]] &&
+    [[ "$hook_line" == *"$CURRENT_DIR/scripts/event.sh"* ]]; then
+    hook_slot="${hook_line%% *}"
+    tmux set-hook -gu "$hook_slot"
   fi
-fi
+done <<< "$existing_hook"
 
 # ensure is idempotent and starts one daemon per tmux server. ReloadConfig keeps
 # a running daemon while atomically retaining its old config on validation error.

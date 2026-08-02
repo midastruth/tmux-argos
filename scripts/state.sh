@@ -13,10 +13,20 @@ if [ "$state" = "done" ] && is_watched_agent_pane "$TMUX_PANE"; then
   state=idle
 fi
 
-session="$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null || true)"
+session_format=$'#{session_id}\t#{session_name}'
+session_identity="$(tmux display-message -p -t "$TMUX_PANE" "$session_format" 2>/dev/null || true)"
+case "$session_identity" in
+*$'\t'*)
+  session_id="${session_identity%%$'\t'*}"
+  session="${session_identity#*$'\t'}"
+  ;;
+*) exit 0 ;;
+esac
+[[ "$session_id" =~ ^\$[0-9]+$ ]] || exit 0
+[ -n "$session" ] || exit 0
 tool="$(tmux show-options -pqv -t "$TMUX_PANE" @agent_tool 2>/dev/null || true)"
 if [ -z "$tool" ] && [ -n "$session" ] && is_managed_session "$session"; then
-  tool="$(tmux show-options -qv -t "$session" @agent_tool 2>/dev/null || true)"
+  tool="$(tmux show-options -qv -t "$session_id" @agent_tool 2>/dev/null || true)"
 fi
 [ -n "$tool" ] || tool="${AGENT_TOOL:-codex}"
 case "$tool" in
@@ -47,16 +57,16 @@ mirror_args=(
 )
 if [ -n "$session" ] && is_managed_session "$session"; then
   mirror_args+=(
-    \; set-option -t "$session" @agent_state "$state"
-    \; set-option -t "$session" @agent_state_at "$now"
-    \; set-option -t "$session" @agent_process_generation "$generation"
-    \; set-option -t "$session" @agent_sequence "$sequence"
-    \; set-option -t "$session" @agent_pane "$TMUX_PANE"
+    \; set-option -t "$session_id" @agent_state "$state"
+    \; set-option -t "$session_id" @agent_state_at "$now"
+    \; set-option -t "$session_id" @agent_process_generation "$generation"
+    \; set-option -t "$session_id" @agent_sequence "$sequence"
+    \; set-option -t "$session_id" @agent_pane "$TMUX_PANE"
   )
 fi
 tmux "${mirror_args[@]}" 2>/dev/null || exit 1
 
 json_string() { local value="$1"; value=${value//\\/\\\\}; value=${value//\"/\\\"}; printf '"%s"' "$value"; }
-request="{\"type\":\"Report\",\"tool\":$(json_string "$tool"),\"pane_id\":$(json_string "$TMUX_PANE"),\"process_generation\":$(json_string "$generation"),\"sequence\":$sequence,\"state\":\"$state\",\"session_name\":$(json_string "$session")}"
+request="{\"type\":\"Report\",\"tool\":$(json_string "$tool"),\"pane_id\":$(json_string "$TMUX_PANE"),\"process_generation\":$(json_string "$generation"),\"sequence\":$sequence,\"state\":\"$state\",\"session_id\":$(json_string "$session_id"),\"session_name\":$(json_string "$session")}"
 "$DIR/daemon.sh" send "$request" >/dev/null 2>&1 || true
 exit 0
