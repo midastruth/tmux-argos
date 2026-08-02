@@ -8,7 +8,8 @@
 # Tunables (environment):
 #   PERF_ITERATIONS      measured runs per case (default 7)
 #   PERF_WARMUP          discarded warm-up runs per case (default 2)
-#   PERF_MAX_PICKER_MS   absolute median threshold for picker.sh (0 disables)
+#   PERF_MAX_PICKER_MS   absolute median threshold for picker.sh (default 500;
+#                        0 disables)
 #   PERF_MAX_GROWTH      max allowed median growth when n doubles 50->100
 #                        (default 3.5; linear ~2x, quadratic ~4x; 0 disables)
 #
@@ -178,7 +179,7 @@ check_growth() {
 
 iterations="${PERF_ITERATIONS:-7}"
 warmup="${PERF_WARMUP:-2}"
-max_picker_ms="${PERF_MAX_PICKER_MS:-5000}"
+max_picker_ms="${PERF_MAX_PICKER_MS:-500}"
 max_growth="${PERF_MAX_GROWTH:-3.5}"
 
 printf 'Smoke performance test (mock tmux, %s warmup + %s measured runs/case)\n' "$warmup" "$iterations"

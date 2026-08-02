@@ -603,7 +603,7 @@ impl StateCenter {
             self.animation_deadline = None;
             self.frame_index = 0;
         }
-        self.expiry_deadline = self.next_expiry();
+        self.expiry_deadline = self.next_expiry(now);
         let summary = if self.config.status_enabled {
             self.render()
         } else {
@@ -617,16 +617,17 @@ impl StateCenter {
         }
     }
 
-    fn next_expiry(&self) -> Option<Instant> {
+    fn next_expiry(&self, now: Instant) -> Option<Instant> {
         if self.config.state_ttl.is_zero() {
             return None;
         }
+        let wall_clock_now = SystemTime::now();
         self.agents
             .values()
             .filter(|record| matches!(record.state, AgentState::Working | AgentState::Blocked))
             .filter_map(|record| {
-                let age = record.changed_at.elapsed().ok()?;
-                Some(Instant::now() + self.config.state_ttl.saturating_sub(age))
+                let age = wall_clock_now.duration_since(record.changed_at).ok()?;
+                Some(now + self.config.state_ttl.saturating_sub(age))
             })
             .min()
     }
@@ -977,28 +978,30 @@ fn basename(path: &str) -> &str {
 }
 
 fn detect_codex(title: &str, screen: &str) -> ScreenDetection {
-    if contains_ci(title, "Action Required") {
+    let title_lowercase = title.to_ascii_lowercase();
+    if title_lowercase.contains("action required") {
         return detection(AgentState::Blocked);
     }
     if starts_with_braille_spinner(title) {
         return detection(AgentState::Working);
     }
     let after_prompt = after_last_codex_prompt(screen);
-    if contains_all_ci(
-        after_prompt,
+    let after_prompt_lowercase = after_prompt.to_ascii_lowercase();
+    if contains_all(
+        &after_prompt_lowercase,
         &[
             "↑/↓ to scroll",
             "pgup/pgdn to",
             "home/end to jump",
             "q to quit",
         ],
-    ) && (contains_ci(after_prompt, "esc to edit prev")
-        || contains_ci(after_prompt, "esc/← to edit prev"))
+    ) && (after_prompt_lowercase.contains("esc to edit prev")
+        || after_prompt_lowercase.contains("esc/← to edit prev"))
     {
         return skip_detection();
     }
-    if contains_any_ci(
-        after_prompt,
+    if contains_any(
+        &after_prompt_lowercase,
         &[
             "press enter to confirm or esc to cancel",
             "enter to submit answer",
@@ -1008,13 +1011,11 @@ fn detect_codex(title: &str, screen: &str) -> ScreenDetection {
     ) {
         return detection(AgentState::Blocked);
     }
-    if weak_blocker(screen) {
+    let screen_lowercase = screen.to_ascii_lowercase();
+    if weak_blocker(screen, &screen_lowercase) {
         return detection(AgentState::Blocked);
     }
-    if !title.trim().is_empty()
-        && !starts_with_braille_spinner(title)
-        && !contains_ci(title, "Action Required")
-    {
+    if !title.trim().is_empty() && !starts_with_braille_spinner(title) {
         return detection(AgentState::Idle);
     }
     detection(AgentState::Idle)
@@ -1024,19 +1025,20 @@ fn detect_claude(title: &str, screen: &str) -> ScreenDetection {
     if starts_with_braille_spinner(title) {
         return detection(AgentState::Working);
     }
-    let bottom = bottom_non_empty_lines(screen, 3);
-    if contains_ci(bottom, "showing detailed transcript")
-        && contains_any_ci(
-            bottom,
+    let screen_lowercase = screen.to_ascii_lowercase();
+    let bottom_lowercase = bottom_non_empty_lines(&screen_lowercase, 3);
+    if bottom_lowercase.contains("showing detailed transcript")
+        && contains_any(
+            bottom_lowercase,
             &["ctrl+o", "ctrl+e", "↑↓ scroll", "? for shortcuts"],
         )
     {
         return skip_detection();
     }
-    let after_rule = after_last_horizontal_rule(screen);
-    if contains_all_ci(after_rule, &["enter to select", "esc to cancel"])
-        && contains_any_ci(
-            after_rule,
+    let after_rule_lowercase = after_last_horizontal_rule(&screen_lowercase);
+    if contains_all(after_rule_lowercase, &["enter to select", "esc to cancel"])
+        && contains_any(
+            after_rule_lowercase,
             &[
                 "tab/arrow keys to navigate",
                 "arrow keys to navigate",
@@ -1048,13 +1050,17 @@ fn detect_claude(title: &str, screen: &str) -> ScreenDetection {
     {
         return detection(AgentState::Blocked);
     }
-    if contains_all_ci(screen, &["run a dynamic workflow?", "esc to cancel"]) {
+    if contains_all(
+        &screen_lowercase,
+        &["run a dynamic workflow?", "esc to cancel"],
+    ) {
         return detection(AgentState::Blocked);
     }
     let prompt_body = prompt_box_body(screen);
+    let prompt_body_lowercase = prompt_body.to_ascii_lowercase();
     if has_claude_prompt_line(prompt_body)
-        && !contains_any_ci(
-            prompt_body,
+        && !contains_any(
+            &prompt_body_lowercase,
             &[
                 "enter to select",
                 "esc to cancel",
@@ -1066,17 +1072,17 @@ fn detect_claude(title: &str, screen: &str) -> ScreenDetection {
     {
         return detection(AgentState::Idle);
     }
-    if contains_all_ci(
-        screen,
+    if contains_all(
+        &screen_lowercase,
         &["select model", "enter to set as default", "esc to cancel"],
-    ) && !contains_ci(screen, "do you want to proceed?")
-        && !contains_ci(screen, "enter to select")
+    ) && !screen_lowercase.contains("do you want to proceed?")
+        && !screen_lowercase.contains("enter to select")
     {
         return skip_detection();
     }
-    if contains_ci(screen, "do you want to proceed?")
-        && contains_any_ci(
-            screen,
+    if screen_lowercase.contains("do you want to proceed?")
+        && contains_any(
+            &screen_lowercase,
             &[
                 "bash command",
                 "bash(",
@@ -1085,16 +1091,20 @@ fn detect_claude(title: &str, screen: &str) -> ScreenDetection {
                 "ctrl+e to explain",
             ],
         )
-        && contains_any_ci(screen, &["yes", "1. yes", "2. no"])
+        && contains_any(&screen_lowercase, &["yes", "1. yes", "2. no"])
     {
         return detection(AgentState::Blocked);
     }
-    if contains_all_ci(after_rule, &["do you want to proceed?", "esc to cancel"])
-        && contains_any_ci(after_rule, &["1. yes", "2. yes", "2. no", "3. no"])
-    {
+    if contains_all(
+        after_rule_lowercase,
+        &["do you want to proceed?", "esc to cancel"],
+    ) && contains_any(
+        after_rule_lowercase,
+        &["1. yes", "2. yes", "2. no", "3. no"],
+    ) {
         return detection(AgentState::Blocked);
     }
-    if legacy_claude_blocker(screen) {
+    if legacy_claude_blocker(screen, &screen_lowercase) {
         return detection(AgentState::Blocked);
     }
     if title.trim_start().starts_with('✳') {
@@ -1125,33 +1135,34 @@ fn starts_with_braille_spinner(value: &str) -> bool {
         .is_some_and(|ch| ('\u{2800}'..='\u{28ff}').contains(&ch))
 }
 
-fn contains_ci(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
+fn contains_all(haystack_lowercase: &str, needles_lowercase: &[&str]) -> bool {
+    needles_lowercase
+        .iter()
+        .all(|needle| haystack_lowercase.contains(needle))
 }
 
-fn contains_all_ci(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().all(|needle| contains_ci(haystack, needle))
+fn contains_any(haystack_lowercase: &str, needles_lowercase: &[&str]) -> bool {
+    needles_lowercase
+        .iter()
+        .any(|needle| haystack_lowercase.contains(needle))
 }
 
-fn contains_any_ci(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| contains_ci(haystack, needle))
+fn weak_blocker(screen: &str, screen_lowercase: &str) -> bool {
+    screen_lowercase.contains("[y/n]")
+        || screen_lowercase.contains("yes (y)")
+        || ((screen_lowercase.contains("do you want to")
+            || screen_lowercase.contains("would you like to"))
+            && (screen_lowercase.contains("yes") || screen.contains('❯')))
 }
 
-fn weak_blocker(screen: &str) -> bool {
-    contains_ci(screen, "[y/n]")
-        || contains_ci(screen, "yes (y)")
-        || ((contains_ci(screen, "do you want to") || contains_ci(screen, "would you like to"))
-            && (contains_ci(screen, "yes") || screen.contains('❯')))
-}
-
-fn legacy_claude_blocker(screen: &str) -> bool {
+fn legacy_claude_blocker(screen: &str, screen_lowercase: &str) -> bool {
     let prompt_alone = screen.lines().any(|line| line.trim() == "❯");
     if prompt_alone {
         return false;
     }
-    weak_blocker(screen)
-        || contains_any_ci(
-            screen,
+    weak_blocker(screen, screen_lowercase)
+        || contains_any(
+            screen_lowercase,
             &[
                 "waiting for permission",
                 "do you want to allow this connection?",

@@ -464,12 +464,13 @@ covered by Rust tests and the status line itself forks zero processes. Tune or
 disable the threshold with:
 
 ```sh
-PERF_ITERATIONS=10 PERF_MAX_PICKER_MS=5000 bash tests/perf_smoke.sh
+PERF_ITERATIONS=10 PERF_MAX_PICKER_MS=750 bash tests/perf_smoke.sh
 PERF_MAX_PICKER_MS=0 bash tests/perf_smoke.sh
 ```
 
-The tests use a local fake `tmux` binary, so they do not require a running tmux
-server or external test framework. CI also runs `shellcheck` over the plugin
-scripts and entrypoints.
+The picker median defaults to a 500ms ceiling; set `PERF_MAX_PICKER_MS` to tune
+it for slower machines. The tests use a local fake `tmux` binary, so they do not
+require a running tmux server or external test framework. CI also runs
+`shellcheck` over the plugin scripts and entrypoints.
 
 

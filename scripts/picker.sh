@@ -72,25 +72,48 @@ initialize_live_config() {
 # and previews do not need daemon state and must stay cheap.
 daemon_records=''
 
-# lookup_daemon_state <session|pane> <target>
-# On a match, sets daemon_state and daemon_at in the caller's scope and returns
-# 0; returns 1 with both cleared when no record matches. Writing to caller
-# variables instead of stdout avoids one command-substitution fork per picker
-# row, which dominates rendering cost on large workspaces.
-lookup_daemon_state() {
-  local kind="$1" target="$2" _record_session record_session_id record_pane record_state record_changed
-  daemon_state=''
-  daemon_at=''
-  while IFS=$'\037' read -r _record_session record_session_id record_pane record_state record_changed; do
-    [ -n "$record_state" ] || continue
-    if { [ "$kind" = session ] && [ "$record_session_id" = "$target" ]; } ||
-      { [ "$kind" = pane ] && [ "$record_pane" = "$target" ]; }; then
-      daemon_state="$record_state"
-      daemon_at="$record_changed"
-      return 0
-    fi
-  done <<< "$daemon_records"
-  return 1
+# merge_daemon_state <session|pane>
+# Reads daemon rows followed by a marker and tmux rows. One awk pass indexes the
+# daemon snapshot and joins every tmux row in O(records + rows) time. Keeping the
+# join outside the Bash row loops avoids repeatedly scanning the full snapshot.
+merge_daemon_state() {
+  local kind="$1"
+  awk -v kind="$kind" '
+    $0 == "__tmux_argos_rows__" {
+      reading_tmux = 1
+      next
+    }
+    !reading_tmux {
+      count = split($0, daemon, "\037")
+      if (count == 5 && daemon[4] != "") {
+        key = (kind == "session") ? daemon[2] : daemon[3]
+        if (key != "" && !(key in states)) {
+          states[key] = daemon[4]
+          changed[key] = daemon[5]
+        }
+      }
+      next
+    }
+    {
+      count = split($0, row, "\t")
+      key = row[2]
+      found = (key in states) ? 1 : 0
+      if (kind == "session") {
+        if (found) {
+          row[3] = states[key]
+          row[4] = changed[key]
+        }
+        for (field_index = 1; field_index <= 8; field_index++) {
+          printf "%s%s", row[field_index], (field_index == 8 ? "\n" : "\t")
+        }
+      } else {
+        for (field_index = 1; field_index <= 5; field_index++) {
+          printf "%s\t", row[field_index]
+        }
+        printf "%d\t%s\t%s\n", found, states[key], changed[key]
+      }
+    }
+  '
 }
 
 # short_path <absolute-path>
@@ -177,22 +200,22 @@ pane_still_exists() {
 }
 
 emit_managed_rows() {
-  local now s session_id state at path cmd tool instance name rank label desc ago disp_path daemon_state daemon_at picker_field
+  local now s session_id state at path cmd tool instance name rank label desc ago disp_path picker_field
   local tmux_format
   now=$(picker_now)
   # Replace row separators inside tmux metadata before parsing. In particular,
   # pane paths may legally contain tabs or newlines and must never shift the
   # immutable session ID into an action field chosen by display metadata.
   tmux_format=$'#{s/[\t\n\r]/ /:session_name}\t#{session_id}\t#{s/[\t\n\r]/ /:@agent_state}\t#{s/[\t\n\r]/ /:@agent_state_at}\t#{s/[\t\n\r]/ /:pane_current_path}\t#{s/[\t\n\r]/ /:@agent_tool}\t#{s/[\t\n\r]/ /:pane_current_command}\t#{s/[\t\n\r]/ /:@agent_instance}'
-  tmux list-sessions -F "$tmux_format" 2>/dev/null |
+  {
+    printf '%s\n' "$daemon_records"
+    printf '%s\n' '__tmux_argos_rows__'
+    tmux list-sessions -F "$tmux_format" 2>/dev/null
+  } | merge_daemon_state session |
     while IFS=$'\t' read -r s session_id state at path tool cmd instance; do
       [[ "$session_id" =~ ^\$[0-9]+$ ]] || continue
       is_managed_session "$s" || continue
       name=${path##*/}
-      if lookup_daemon_state session "$session_id"; then
-        state="$daemon_state"
-        at="$daemon_at"
-      fi
       # The agent recorded at launch, falling back to whatever runs in the pane.
       [ -n "$tool" ] || tool=${cmd##*/}
       [ -n "$instance" ] && tool="${tool}-${instance}"
@@ -224,21 +247,25 @@ emit_managed_rows() {
 }
 
 emit_manual_rows() {
-  local now panes s pane cmd ppid path state at opts line base name rank label desc ago disp_path daemon_state daemon_at picker_field
-  local tmux_format
+  local now panes s pane cmd ppid path state at opts line base command_name name rank label desc ago disp_path picker_field
+  local daemon_found tmux_format
   now=$(picker_now)
   tmux_format=$'#{s/[\t\n\r]/ /:session_name}\t#{pane_id}\t#{s/[\t\n\r]/ /:pane_current_command}\t#{pane_pid}\t#{s/[\t\n\r]/ /:pane_current_path}'
-  panes="$(tmux list-panes -a -F "$tmux_format" 2>/dev/null)" || return 1
+  panes="$({
+    printf '%s\n' "$daemon_records"
+    printf '%s\n' '__tmux_argos_rows__'
+    tmux list-panes -a -F "$tmux_format" 2>/dev/null
+  } | merge_daemon_state pane)" || return 1
 
   # Snapshot ps at most once, and only when at least one non-managed pane is
   # running a configured wrapper command. This preserves the cheap direct-command
   # path while avoiding one full process-table scan per node/npm/bun pane.
   AGENT_PS_TABLE=''
   AGENT_PS_TABLE_READY=0
-  while IFS=$'\t' read -r s pane cmd ppid path; do
+  while IFS=$'\t' read -r s pane cmd ppid path daemon_found state at; do
     [[ "$pane" =~ ^%[0-9]+$ ]] || continue
     is_managed_session "$s" && continue
-    if is_wrapper_command "${cmd##*/}"; then
+    if contains_word "${cmd##*/}" "$AGENT_DETECT_WRAPPERS"; then
       # shellcheck disable=SC2034 # resolve_pane_agent reads these via dynamic scope
       AGENT_PS_TABLE="$(process_table_snapshot 2>/dev/null || true)"
       # shellcheck disable=SC2034 # resolve_pane_agent reads these via dynamic scope
@@ -247,20 +274,24 @@ emit_manual_rows() {
     fi
   done <<< "$panes"
 
-  while IFS=$'\t' read -r s pane cmd ppid path; do
+  while IFS=$'\t' read -r s pane cmd ppid path daemon_found state at; do
     [[ "$pane" =~ ^%[0-9]+$ ]] || continue
     # Managed sessions are already listed as managed agent sessions.
     is_managed_session "$s" && continue
-    # Resolve the agent name, including wrappers (codex runs under node) by
-    # walking the pane's process subtree only for known wrapper commands.
-    # Empty -> not an agent pane.
-    base="$(resolve_pane_agent "${cmd##*/}" "$ppid")" || continue
-    [ -n "$base" ] || continue
-    name=${path##*/}
-    if lookup_daemon_state pane "$pane"; then
-      state="$daemon_state"
-      at="$daemon_at"
+    command_name="${cmd##*/}"
+    if [ "$command_name" = claude.exe ] && contains_word claude "$AGENT_DETECT_COMMANDS"; then
+      base=claude
+    elif contains_word "$command_name" "$AGENT_DETECT_COMMANDS"; then
+      base="$command_name"
+    elif contains_word "$command_name" "$AGENT_DETECT_WRAPPERS"; then
+      # Wrapped agents need process-tree resolution; direct agents stay entirely
+      # in this shell and avoid a subprocess for every listed pane.
+      base="$(resolve_pane_agent "$command_name" "$ppid")" || continue
     else
+      continue
+    fi
+    name=${path##*/}
+    if [ "$daemon_found" != 1 ]; then
       # The tmux mirror is the daemon's restart/recovery snapshot and remains a
       # reliable picker fallback while the daemon client is unavailable.
       if ! opts="$(tmux show-options -p -t "$pane" 2>/dev/null)"; then

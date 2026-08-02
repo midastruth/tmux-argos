@@ -32,7 +32,11 @@ agent_session_prefix() {
 
 is_managed_session() {
   local session="$1" prefix
-  prefix="$(agent_session_prefix)"
+  if [ -n "${AGENT_SESSION_PREFIX:-}" ]; then
+    prefix="$AGENT_SESSION_PREFIX"
+  else
+    prefix="$(get_tmux_option @agent_session_prefix 'agent-')"
+  fi
   [[ "$session" == "$prefix"* ]]
 }
 
@@ -137,13 +141,25 @@ contains_word() {
 # is_detected_command <command-basename>
 # Succeeds when <command-basename> is in the detect_commands list.
 is_detected_command() {
-  contains_word "$1" "$(detect_commands)"
+  local commands
+  if [ -n "${AGENT_DETECT_COMMANDS:-}" ]; then
+    commands="$AGENT_DETECT_COMMANDS"
+  else
+    commands="$(get_tmux_option @agent_detect_commands 'pi codex claude')"
+  fi
+  contains_word "$1" "$commands"
 }
 
 # is_wrapper_command <command-basename>
 # Succeeds when <command-basename> is allowed to trigger process-subtree scans.
 is_wrapper_command() {
-  contains_word "$1" "$(wrapper_commands)"
+  local commands
+  if [ -n "${AGENT_DETECT_WRAPPERS:-}" ]; then
+    commands="$AGENT_DETECT_WRAPPERS"
+  else
+    commands="$(get_tmux_option @agent_detect_wrappers 'node bun npx npm pnpm yarn')"
+  fi
+  contains_word "$1" "$commands"
 }
 
 # process_table_snapshot
@@ -165,7 +181,7 @@ process_table_snapshot() {
 # descendants of <pane-pid> and return the first child whose comm matches the
 # detect list. This makes codex discoverable while keeping bare commands fast.
 resolve_pane_agent() {
-  local cmd="$1" pid="$2" table out
+  local cmd="$1" pid="$2" table out detects
   # Claude Code may expose its executable name as claude.exe even on macOS.
   # Treat it as the configured logical `claude` tool.
   if [ "$cmd" = claude.exe ] && is_detected_command claude; then
@@ -190,9 +206,14 @@ resolve_pane_agent() {
   # Build parent->children and pid->comm indexes in awk, then do one BFS. This
   # avoids the old O(subtree * process-table) bash loop and lets picker.sh reuse
   # one ps snapshot for every wrapper pane.
+  if [ -n "${AGENT_DETECT_COMMANDS:-}" ]; then
+    detects="$AGENT_DETECT_COMMANDS"
+  else
+    detects="$(detect_commands)"
+  fi
   out="$({
     printf '%s\n' "$table"
-  } | awk -v root="$pid" -v detects="$(detect_commands)" '
+  } | awk -v root="$pid" -v detects="$detects" '
     BEGIN {
       n = split(detects, d, /[[:space:]]+/)
       for (i = 1; i <= n; i++) if (d[i] != "") wanted[d[i]] = 1
