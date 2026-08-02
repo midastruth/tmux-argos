@@ -325,21 +325,192 @@ emit_history_rows() {
     done | format_rows
 }
 
+# kill_target <session|pane> <target>
+# Returns the status of the underlying tmux operation so bulk callers can tell
+# an actual kill from a session that vanished or that tmux refused.
 kill_target() {
   local kind="$1" target="$2" event_q
   event_q="$(printf '%q' "$DIR/event.sh")"
   case "$kind" in
   session)
-    if tmux kill-session -t "$target" 2>/dev/null; then
-      tmux run-shell -b "$event_q exited-session $(printf '%q' "$target")" 2>/dev/null || true
-    fi
+    tmux kill-session -t "$target" 2>/dev/null || return 1
+    tmux run-shell -b "$event_q exited-session $(printf '%q' "$target")" 2>/dev/null || true
+    return 0
     ;;
   pane)
     # Ctrl-C interrupts the current turn; it does not prove the long-lived CLI
     # exited, so keep daemon state and Claude polling active.
-    tmux send-keys -t "$target" C-c 2>/dev/null
+    tmux send-keys -t "$target" C-c 2>/dev/null || return 1
+    return 0
     ;;
   esac
+  return 1
+}
+
+# Default idle age for the picker's bulk stale-session cleanup.
+STALE_KILL_AGE_DEFAULT='7d'
+
+# Longest accepted digit run in @agent_stale_kill_age. Shell arithmetic is
+# 64-bit signed, so an absurd literal multiplied by 86400 can wrap to a small
+# positive number and turn into a near-zero threshold that selects every
+# unattached managed session. 12 digits still allows ~31000 years in days.
+STALE_KILL_AGE_MAX_DIGITS=12
+
+# parse_duration_seconds <value>
+# Prints <value> in seconds. Accepts a bare seconds count or one unit suffix
+# (90s / 45m / 12h / 7d). Returns 1 on anything else so a typo in
+# @agent_stale_kill_age is reported instead of silently falling back to a
+# threshold the user never asked for.
+parse_duration_seconds() {
+  local raw="$1" number unit multiplier seconds
+  [ -n "$raw" ] || return 1
+  unit="${raw: -1}"
+  case "$unit" in
+  s) multiplier=1; number="${raw%?}" ;;
+  m) multiplier=60; number="${raw%?}" ;;
+  h) multiplier=3600; number="${raw%?}" ;;
+  d) multiplier=86400; number="${raw%?}" ;;
+  [0-9]) multiplier=1; number="$raw" ;;
+  *) return 1 ;;
+  esac
+  case "$number" in
+  ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#number}" -le "$STALE_KILL_AGE_MAX_DIGITS" ] || return 1
+  # 10# forces base 10: bash reads a leading-zero literal such as 08 as octal and
+  # aborts the expansion with "value too great for base", printing a raw shell
+  # error before the caller can report the configured value.
+  seconds=$((10#$number * multiplier))
+  # A zero threshold means "every unattached managed session with a known
+  # timestamp", which is not a staleness rule. Reject it with the other invalid
+  # inputs rather than let it drive an irreversible bulk kill.
+  [ "$seconds" -gt 0 ] || return 1
+  printf '%s' "$seconds"
+}
+
+# latest_daemon_session_change <session>
+# Sets daemon_at in the caller's scope to the newest changedAt across every
+# daemon record naming <session>, and returns 0; returns 1 with daemon_at
+# cleared when the snapshot holds no usable record.
+#
+# Row rendering uses lookup_daemon_state, which stops at the first matching
+# record. Daemon records come from a HashMap, so their order is arbitrary, and
+# one managed session can own several at once (a screen record per codex/claude
+# pane alongside an event record per pi process generation). Arbitrary order
+# only jitters a status label while rendering, but on the kill path it could
+# select a week-old record for a session that reported activity a minute ago and
+# destroy live work, so take the maximum here.
+latest_daemon_session_change() {
+  local session="$1" record_session record_pane record_state record_changed
+  daemon_at=''
+  while IFS=$'\037' read -r record_session record_pane record_state record_changed; do
+    [ -n "$record_state" ] || continue
+    [ "$record_session" = "$session" ] || continue
+    [[ "$record_changed" =~ ^[0-9]+$ ]] || continue
+    if [ -z "$daemon_at" ] || [ "$record_changed" -gt "$daemon_at" ]; then
+      daemon_at="$record_changed"
+    fi
+  done <<< "$daemon_records"
+  [ -n "$daemon_at" ]
+}
+
+# stale_session_targets <max-age-seconds> <now>
+# Prints "<session>\t<last-change-epoch-seconds>" for every managed session
+# eligible for bulk cleanup, oldest first. Eligibility is deliberately narrow
+# because killing a session is irreversible:
+#   - managed agent sessions only: manual rows are panes inside the user's own
+#     sessions, and history rows are saved transcripts rather than processes;
+#   - unattached sessions only, because a session someone is watching can be
+#     alive while reporting no state change for days;
+#   - sessions the daemon snapshot knows about only, with a positive changedAt:
+#     an unknown timestamp ('-' in the picker) is no evidence of staleness, and
+#     the daemon serializes a missing changedAt as 0 rather than omitting the
+#     record.
+#
+# Returns 1 without printing when the daemon snapshot cannot be read. The daemon
+# is the only live source of last-change time here: the tmux mirror
+# (@agent_state_at) is written once by launch.sh at session creation and is
+# never refreshed for codex/claude sessions (state.sh returns early for them,
+# the pi extension does not run there, and the daemon writes only
+# @agent_status_cache). Falling back to that mirror would report a codex session
+# that has been working all week as a week idle and bulk-kill live work, so an
+# unavailable daemon aborts the cleanup instead of degrading it.
+stale_session_targets() {
+  local max_age="$1" now="$2"
+  local session attached daemon_at
+  daemon_records="$("$DIR/daemon.sh" snapshot-picker 2>/dev/null)" || return 1
+  tmux list-sessions -F '#{session_name}	#{session_attached}' 2>/dev/null |
+    while IFS=$'\t' read -r session attached; do
+      [ -n "$session" ] || continue
+      is_managed_session "$session" || continue
+      [ "$attached" = 0 ] || continue
+      latest_daemon_session_change "$session" || continue
+      [ "$daemon_at" -gt 0 ] || continue
+      [ "$((now - daemon_at))" -ge "$max_age" ] || continue
+      printf '%s\t%s\n' "$session" "$daemon_at"
+    done |
+    sort -t$'\t' -k2,2n
+}
+
+# kill_stale_sessions
+# ctrl-r handler: kill every managed session idle for at least
+# @agent_stale_kill_age, after an explicit confirmation typed in the picker's
+# terminal. fzf runs this through execute() (not execute-silent) so the prompt
+# owns the terminal. Non-destructive outcomes report through tmux's status line
+# because fzf redraws over terminal output as soon as this returns.
+kill_stale_sessions() {
+  local configured max_age now targets killed failed session state_at ago reply
+  configured="$(get_tmux_option @agent_stale_kill_age "$STALE_KILL_AGE_DEFAULT")"
+  if ! max_age="$(parse_duration_seconds "$configured")"; then
+    tmux display-message "tmux-agents-session-manager: invalid @agent_stale_kill_age '$configured' (use 900, 90s, 45m, 12h or 7d)"
+    return 1
+  fi
+  now="$(picker_now)"
+  if ! targets="$(stale_session_targets "$max_age" "$now")"; then
+    tmux display-message 'tmux-agents-session-manager: daemon state unavailable; stale cleanup needs it to tell an idle session from a working one'
+    return 1
+  fi
+  if [ -z "$targets" ]; then
+    tmux display-message "tmux-agents-session-manager: no unattached agent session idle for $configured"
+    return 0
+  fi
+
+  printf 'Kill these unattached agent sessions idle for at least %s?\n' "$configured"
+  while IFS=$'\t' read -r session state_at; do
+    [ -n "$session" ] || continue
+    humanize_ago "$state_at" "$now"
+    printf '  %-32s %4s\n' "$session" "$ago"
+  done <<< "$targets"
+  printf 'This cannot be undone; transcripts stay resumable from the history tab.\n'
+  printf 'Type y to kill, anything else to cancel: '
+  read -r reply
+  case "$reply" in
+  y|Y) ;;
+  *)
+    tmux display-message 'tmux-agents-session-manager: stale cleanup cancelled'
+    return 0
+    ;;
+  esac
+
+  # A session can disappear between the confirmation prompt and the kill, and
+  # tmux can refuse the operation. Count only what actually died so a partial
+  # failure is never reported as a clean sweep.
+  killed=0
+  failed=0
+  while IFS=$'\t' read -r session state_at; do
+    [ -n "$session" ] || continue
+    if kill_target session "$session"; then
+      killed=$((killed + 1))
+    else
+      failed=$((failed + 1))
+    fi
+  done <<< "$targets"
+  if [ "$failed" -gt 0 ]; then
+    tmux display-message "tmux-agents-session-manager: killed $killed agent session(s), $failed could not be killed"
+    return 1
+  fi
+  tmux display-message "tmux-agents-session-manager: killed $killed agent session(s) idle for $configured"
+  return 0
 }
 
 open_session_target() {
@@ -424,6 +595,11 @@ open_target() {
   exit 0
 }
 
+[ "${1:-}" = '--kill-stale' ] && {
+  kill_stale_sessions
+  exit $?
+}
+
 parent_client="${1:-}"
 
 if ! command -v fzf >/dev/null 2>&1; then
@@ -438,10 +614,12 @@ trap 'rm -f "$mode_file"' EXIT
 printf 'live' >"$mode_file"
 mode_file_q="$(printf '%q' "$mode_file")"
 export FZF_DEFAULT_OPTS=''
+stale_kill_age="$(get_tmux_option @agent_stale_kill_age "$STALE_KILL_AGE_DEFAULT")"
+header="Agent sessions · Tab: live/history · enter: open/resume · ctrl-x: kill live target · ctrl-r: kill sessions idle ${stale_kill_age}+"
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=13 \
-  --reverse --cycle --header='Agent sessions · Tab: live/history · enter: open/resume · ctrl-x: kill live target' \
+  --reverse --cycle --header="$header" \
   --preview="$self_cmd --preview {2} {3} {9}" --preview-window='right,62%,wrap' \
-  --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3})+reload($self_cmd --list-mode $mode_file_q)")
+  --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3})+reload($self_cmd --list-mode $mode_file_q),ctrl-r:execute($self_cmd --kill-stale)+reload($self_cmd --list-mode $mode_file_q)")
 
 [ -z "$sel" ] && exit 0
 kind="$(printf '%s' "$sel" | cut -f2)"

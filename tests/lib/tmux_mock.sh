@@ -22,7 +22,8 @@
 #   TMUX_MOCK_CURRENT_SESSION  session name for '#S' display-message formats
 #   TMUX_MOCK_PANE_SESSION     session name for '#{session_name}' formats
 #   TMUX_MOCK_PANE_VISIBLE     output for '#{session_attached}' formats
-#   TMUX_MOCK_FAIL_TARGETS     space-separated targets whose -t queries fail
+#   TMUX_MOCK_FAIL_TARGETS     space-separated targets whose -t queries fail,
+#                              including kill-session
 #   TMUX_MOCK_FAIL_REFRESH_CLIENT
 #                              non-empty makes refresh-client fail
 #   TMUX_MOCK_SHOW_HOOKS       hook names returned by show-hooks -g
@@ -293,7 +294,14 @@ case "$cmd" in
       printf '%s' stale
     fi
     ;;
-  new-session|set-option|set-hook|display-popup|kill-session|send-keys|attach-session|switch-client|detach-client)
+  kill-session)
+    # Model a session that vanished or that tmux refuses to kill, so callers can
+    # be tested for propagating the failure instead of reporting a clean sweep.
+    target="$(target_arg "$@" || true)"
+    target_should_fail "$target" && exit 1
+    exit 0
+    ;;
+  new-session|set-option|set-hook|display-popup|send-keys|attach-session|switch-client|detach-client)
     exit 0
     ;;
   run-shell)

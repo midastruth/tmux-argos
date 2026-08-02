@@ -23,7 +23,8 @@ or swap agents via `@agent_agents`.
 - 🎯 **Smart jump** back to the window where the session was launched.
 - 🚀 **Launcher** (`prefix` + `y`) to open or attach an agent session for the
   current directory.
-- ❌ **Quick kill** (`ctrl-x`) from the picker.
+- ❌ **Quick kill** (`ctrl-x`) from the picker, plus a confirmed bulk cleanup
+  (`ctrl-r`) of unattached agent sessions idle past `@agent_stale_kill_age`.
 - 📊 **Status-line summary**: a compact `agents 1● 2✦ 1✓` fragment counting
   blocked / working / done states from the daemon cache without forking from the
   status line. Place it anywhere in your own status line.
@@ -100,7 +101,32 @@ Inside the picker:
 | `Tab`                     | Toggle between running sessions/panes and saved conversation history       |
 | `enter`                   | Open a live target, or resume the selected historical conversation         |
 | `ctrl-x`                  | Kill a managed session, or send `Ctrl-C` to a manual agent pane            |
+| `ctrl-r`                  | Kill every unattached managed session idle for at least `@agent_stale_kill_age`, after confirmation |
 | `↑` / `↓`, type to filter | fzf navigation                                                             |
+
+`ctrl-r` lists the sessions it would kill, then waits for a typed `y`; anything
+else cancels. It is deliberately narrow, because killing a session is
+irreversible:
+
+- only managed agent sessions are considered — manual rows are panes inside your
+  own sessions, and history rows are saved transcripts rather than live processes;
+- attached sessions are always skipped, since a session you are watching can be
+  alive while reporting no state change for days;
+- only the state daemon's snapshot decides a session's age. A session the daemon
+  does not know about (its age renders as `-`) is skipped, and if the snapshot
+  cannot be read at all the cleanup aborts and says so on the status line. The
+  tmux option `@agent_state_at` is written once when a session is created and is
+  never refreshed for `codex`/`claude` sessions, so falling back to it would
+  report an actively working session as idle since its launch day;
+- when a session has several daemon records (for example a `codex` pane and a
+  `pi` pane in one session), the **newest** one decides its age.
+
+The summary reports only the sessions that were actually killed; if tmux refuses
+any of them, the count of failures is reported too.
+
+The age it compares against is the last reported state change, not terminal
+activity. Killed agents lose their in-memory context, but their transcripts stay
+resumable from the history tab (`Tab`).
 
 History mode reads the native local stores for Pi (`~/.pi/agent/sessions`),
 Codex (`~/.codex/sessions`), and Claude (`~/.claude/projects`). Its preview
@@ -321,11 +347,20 @@ set -g @agent_detect_wrappers 'node bun npx npm pnpm yarn'
 set -g @agent_session_prefix 'agent-'
 set -g @agent_popup_width    '90%'
 set -g @agent_popup_height   '90%'
+set -g @agent_stale_kill_age '7d'
 set -g @agent_history_pi_dir     '~/.pi/agent/sessions'
 set -g @agent_history_codex_dir  '~/.codex'
 set -g @agent_history_claude_dir '~/.claude'
 set -g @agent_history_binary '/path/to/daemon/target/release/tmux-agents-history'
 ```
+
+`@agent_stale_kill_age` is the idle threshold for the picker's `ctrl-r` bulk
+cleanup. It accepts a bare seconds count or one unit suffix: `900`, `90s`, `45m`,
+`12h`, `7d`. An unparseable value, a non-positive one (including `0`, which would
+mean "kill every unattached managed session"), or a digit run longer than 12
+characters (which can overflow shell arithmetic into a tiny threshold) disables
+the cleanup and reports the error on the tmux status line rather than falling
+back to a threshold you did not ask for.
 
 The history directory options are useful when an agent's local data home is
 customized. The plugin expands a leading `~/`. `@agent_history_binary` defaults
