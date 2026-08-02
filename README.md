@@ -113,15 +113,17 @@ all” operation.
 Sessions displayed as `working` or `blocked` are protected. Immediately before
 the bulk kill, the picker also reads a fresh daemon snapshot; any current
 `working` or `blocked` record protects the entire session even if another record
-for that session is idle. If daemon state is unavailable or malformed, the bulk
-kill aborts without killing anything. `idle`, `done`, and `unknown` matched
-sessions are eligible.
+for that session is idle. If daemon state is unavailable or malformed, or any
+matched picker row does not have the complete expected schema, the bulk kill
+aborts without killing anything. `idle`, `done`, and `unknown` matched sessions
+are eligible.
 
 Manual Agent panes and history rows are ignored because they are not managed
 live sessions. There is no additional confirmation prompt: the current fzf
-query is the selection boundary. Successful kills are reported to the daemon by
-one background lifecycle worker, and the picker reloads the current mode after
-the operation.
+query is the selection boundary. Successful kills are reported to the daemon
+synchronously before the picker becomes interactive again, preventing a newly
+launched numbered session from reusing a name before its predecessor's exit is
+recorded. The picker then reloads the current mode.
 
 History mode reads the native local stores for Pi (`~/.pi/agent/sessions`),
 Codex (`~/.codex/sessions`), and Claude (`~/.claude/projects`). Its preview

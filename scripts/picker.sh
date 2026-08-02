@@ -338,12 +338,19 @@ emit_history_rows() {
 }
 
 kill_target() {
-  local kind="$1" target="$2" event_q
-  event_q="$(printf '%q' "$DIR/event.sh")"
+  local kind="$1" target="$2"
   case "$kind" in
   session)
-    if tmux kill-session -t "$target" 2>/dev/null; then
-      tmux run-shell -b "$event_q exited-session $(printf '%q' "$target")" 2>/dev/null || true
+    if ! tmux kill-session -t "$target" 2>/dev/null; then
+      return 1
+    fi
+    # Complete the name-based exit report before fzf becomes interactive
+    # again, so a newly launched numbered session cannot reuse the name first.
+    if ! "$DIR/event.sh" exited-session "$target" >/dev/null 2>&1; then
+      # The tmux kill is irreversible, so this boundary can only report the
+      # lifecycle failure rather than roll back or retry without a bound.
+      tmux display-message 'tmux-agents-session-manager: session killed, but daemon exit report failed'
+      return 1
     fi
     ;;
   pane)
@@ -354,19 +361,19 @@ kill_target() {
   esac
 }
 
-# schedule_session_exit_reports <newline-separated-sessions>
-# Starts one background worker for a completed bulk kill. Reports are sent
-# sequentially so clearing a large match set does not create one daemon client
-# per session or make the picker wait on daemon retry paths after a kill.
-schedule_session_exit_reports() {
-  local sessions="$1" command session
+# report_session_exits <newline-separated-sessions>
+# Reports a completed bulk kill synchronously and sequentially. Session names
+# are reusable, so this must finish before fzf returns interactive control.
+report_session_exits() {
+  local sessions="$1" session
+  local -a event_arguments=()
   [ -n "$sessions" ] || return 0
-  command="$(printf '%q' "$DIR/event.sh") exited-sessions"
   while IFS= read -r session; do
     [ -n "$session" ] || continue
-    command+=" $(printf '%q' "$session")"
+    event_arguments+=("$session")
   done <<< "$sessions"
-  tmux run-shell -b "$command" 2>/dev/null || true
+  [ "${#event_arguments[@]}" -gt 0 ] || return 0
+  "$DIR/event.sh" exited-sessions "${event_arguments[@]}" >/dev/null 2>&1
 }
 
 # kill_matched_sessions <fzf-matched-rows-file>
@@ -377,15 +384,35 @@ schedule_session_exit_reports() {
 # that were already shown in either state before the snapshot was requested.
 kill_matched_sessions() {
   local matched_file="$1" matched_session_rows daemon_records validated_targets marker
-  local killed failed skipped killed_sessions session protected kill_target
+  local killed failed skipped lifecycle_report_failed killed_sessions session protected kill_target
 
   if [ -z "$matched_file" ] || [ ! -r "$matched_file" ]; then
     tmux display-message 'tmux-agents-session-manager: matched picker rows could not be read; bulk kill aborted'
     return 1
   fi
 
-  if ! matched_session_rows="$(awk -F '\t' '$2 == "session" && $3 != "" { print }' "$matched_file")"; then
-    tmux display-message 'tmux-agents-session-manager: matched picker rows could not be parsed; bulk kill aborted'
+  # fzf receives exactly thirteen fields from format_rows. Validate every
+  # matched row before selecting destructive targets: accepting a truncated or
+  # field-shifted session row could hide its safety-relevant raw state.
+  if ! matched_session_rows="$(awk -F '\t' '
+    NF != 13 || $1 !~ /^[0-9]+$/ || $2 !~ /^(session|pane|history|history-error)$/ || $3 == "" || $13 == "" {
+      invalid_row = 1
+      next
+    }
+    $2 == "session" {
+      if ($10 !~ /^(idle|done|working|blocked)?$/ || $11 != "" || $12 != "") {
+        invalid_row = 1
+        next
+      }
+      print
+    }
+    END {
+      if (invalid_row) {
+        exit 1
+      }
+    }
+  ' "$matched_file")"; then
+    tmux display-message 'tmux-agents-session-manager: matched picker rows are malformed; bulk kill aborted'
     return 1
   fi
   if [ -z "$matched_session_rows" ]; then
@@ -409,11 +436,8 @@ kill_matched_sessions() {
   } | awk -F '\t' -v marker="$marker" '
     $0 == marker { reading_daemon = 1; next }
     !reading_daemon {
-      field_count = split($0, picker, "\t")
+      split($0, picker, "\t")
       session = picker[3]
-      if (field_count < 3 || picker[2] != "session" || session == "") {
-        next
-      }
       if (!(session in matched)) {
         matched[session] = 1
         ordered[++count] = session
@@ -473,9 +497,19 @@ kill_matched_sessions() {
     fi
   done <<< "$validated_targets"
 
-  schedule_session_exit_reports "$killed_sessions"
+  # Reporting failure cannot undo successful tmux kills. Return an explicit
+  # boundary error, but do not return control until the bounded report attempt
+  # completes; this closes the numbered-session name reuse race.
+  lifecycle_report_failed=0
+  if ! report_session_exits "$killed_sessions"; then
+    lifecycle_report_failed=1
+  fi
   if [ "$failed" -gt 0 ]; then
     tmux display-message "tmux-agents-session-manager: killed $killed matched session(s), skipped $skipped working/blocked, $failed could not be killed"
+    return 1
+  fi
+  if [ "$lifecycle_report_failed" -eq 1 ]; then
+    tmux display-message "tmux-agents-session-manager: killed $killed matched session(s), skipped $skipped working/blocked; daemon exit report failed"
     return 1
   fi
   tmux display-message "tmux-agents-session-manager: killed $killed matched session(s), skipped $skipped working/blocked"
@@ -564,7 +598,7 @@ open_target() {
 
 [ "${1:-}" = '--kill' ] && {
   kill_target "${2:-}" "${3:-}"
-  exit 0
+  exit $?
 }
 
 [ "${1:-}" = '--kill-matched' ] && {

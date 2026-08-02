@@ -34,6 +34,9 @@ if [ "${1:-}" = snapshot-picker ]; then
 elif [ "${1:-}" = snapshot ]; then
   printf '%s\n' "${DAEMON_SNAPSHOT:-{\"ok\":true,\"data\":{\"records\":[]}}}"
 else
+  if [ -n "${DAEMON_MOCK_FAIL_SEND:-}" ]; then
+    exit 1
+  fi
   printf '{"ok":true}\n'
 fi
 DAEMON_MOCK
@@ -80,7 +83,7 @@ reset_mocks() {
     TMUX_MOCK_IF_SHELL_RESULT TMUX_MOCK_SHOW_HOOKS \
     TMUX_MOCK_PS_CHILDREN TMUX_MOCK_PS_COMM \
     AGENT_SESSION_PREFIX AGENT_DETECT_COMMANDS AGENT_DETECT_WRAPPERS TMUX_PANE \
-    PICKER_NOW
+    PICKER_NOW DAEMON_MOCK_FAIL_SEND
 }
 
 pass() {
@@ -556,7 +559,8 @@ assert_not_contains 'picker interrupt does not report a still-running pane as ex
 
 reset_mocks
 run_bash 'scripts/picker.sh --kill session agent-pi' >/dev/null
-assert_contains 'picker managed-session kill schedules exit report' "$(<"$TMUX_LOG")" 'event.sh exited-session agent-pi'
+assert_contains 'picker managed-session kill reports exit synchronously' "$(<"$DAEMON_LOG")" '"session_name":"agent-pi"'
+assert_not_contains 'picker managed-session kill does not defer a reusable-name exit report' "$(<"$TMUX_LOG")" 'event.sh exited-session agent-pi'
 
 # ctrl-r bulk kill operates on the exact rows currently matched by fzf. The
 # fzf {*f} placeholder writes every match to this file, including all visible
@@ -564,9 +568,9 @@ assert_contains 'picker managed-session kill schedules exit report' "$(<"$TMUX_L
 reset_mocks
 matched_file="$TMP_ROOT/matched-rows"
 printf '%s\n' \
-  $'2\tsession\tagent-one\t🟢 idle   \tone\t1m\t/tmp/one\twaiting\tpi\tidle' \
-  $'1\tsession\tagent-two\t🔵 done   \ttwo\t2m\t/tmp/two\tfinished\tpi\tdone' \
-  $'2\tpane\t%9\t🟣 manual \tmanual\t-\t/tmp/manual\tpane running pi\tpi\t' \
+  $'2\tsession\tagent-one\t🟢 idle   \tone\t1m\t/tmp/one\twaiting\tpi\tidle\t\t\tone display' \
+  $'1\tsession\tagent-two\t🔵 done   \ttwo\t2m\t/tmp/two\tfinished\tpi\tdone\t\t\ttwo display' \
+  $'2\tpane\t%9\t🟣 manual \tmanual\t-\t/tmp/manual\tpane running pi\tpi\t\t\t\tmanual display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
@@ -574,15 +578,29 @@ log_contents="$(<"$TMUX_LOG")"
 assert_contains 'picker bulk kill clears the first managed session in an empty-query match set' "$log_contents" $'kill-session\t-t\t=agent-one'
 assert_contains 'picker bulk kill clears the second managed session in an empty-query match set' "$log_contents" $'kill-session\t-t\t=agent-two'
 assert_not_contains 'picker bulk kill ignores matched manual panes' "$log_contents" $'send-keys\t-t\t%9'
-assert_contains 'picker bulk kill reports every killed session with one lifecycle worker' "$log_contents" 'event.sh exited-sessions agent-one agent-two'
-assert_eq 'picker bulk kill schedules one lifecycle batch' '1' "$(grep -c $'^run-shell\t-b\t.*event.sh exited-sessions' "$TMUX_LOG")"
+daemon_log_contents="$(<"$DAEMON_LOG")"
+assert_contains 'picker bulk kill synchronously reports the first killed session' "$daemon_log_contents" '"session_name":"agent-one"'
+assert_contains 'picker bulk kill synchronously reports the second killed session' "$daemon_log_contents" '"session_name":"agent-two"'
+assert_not_contains 'picker bulk kill does not defer reusable-name exit reports to tmux' "$log_contents" 'event.sh exited-sessions'
 assert_contains 'picker bulk kill reports the completed empty-query clear' "$log_contents" 'killed 2 matched session(s), skipped 0 working/blocked'
+
+# A replacement can emit state as soon as the picker action returns. The old
+# session's name-only Exited event must already have completed by then.
+replacement_request='{"type":"Report","tool":"pi","pane_id":"%replacement","process_generation":"new-generation","sequence":1,"state":"idle","session_name":"agent-one"}'
+run_bash "scripts/daemon.sh send '$replacement_request'" >/dev/null
+exit_line="$(grep -n '"type":"Exited".*"session_name":"agent-one"' "$DAEMON_LOG" | head -n 1 | cut -d: -f1)"
+replacement_line="$(grep -n '"type":"Report".*"session_name":"agent-one"' "$DAEMON_LOG" | head -n 1 | cut -d: -f1)"
+if [ -n "$exit_line" ] && [ -n "$replacement_line" ] && [ "$exit_line" -lt "$replacement_line" ]; then
+  pass 'picker bulk kill completes Exited reporting before a reused session name can report state'
+else
+  fail 'picker bulk kill completes Exited reporting before a reused session name can report state' "Exited line [$exit_line], replacement line [$replacement_line]"
+fi
 
 # A non-empty fzf query passes only its current matches, so sessions outside the
 # filtered result are not considered even if they are otherwise idle.
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-matched\t🟢 idle   \tmatched\t1m\t/tmp/matched\twaiting\tpi\tidle' \
+  $'2\tsession\tagent-matched\t🟢 idle   \tmatched\t1m\t/tmp/matched\twaiting\tpi\tidle\t\t\tmatched display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
@@ -595,9 +613,9 @@ assert_not_contains 'picker bulk kill does not discover sessions outside the fzf
 # session when it owns several agent records.
 reset_mocks
 printf '%s\n' \
-  $'3\tsession\tagent-visible-working\t🟡 working\tvisible\t1m\t/tmp/visible\trunning\tpi\tworking' \
-  $'2\tsession\tagent-current-blocked\t🟢 idle   \tcurrent\t1m\t/tmp/current\twaiting\tpi\tidle' \
-  $'2\tsession\tagent-safe\t⚪ unknown\tsafe\t-\t/tmp/safe\tunknown\tpi\t' \
+  $'3\tsession\tagent-visible-working\t🟡 working\tvisible\t1m\t/tmp/visible\trunning\tpi\tworking\t\t\tvisible display' \
+  $'2\tsession\tagent-current-blocked\t🟢 idle   \tcurrent\t1m\t/tmp/current\twaiting\tpi\tidle\t\t\tcurrent display' \
+  $'2\tsession\tagent-safe\t⚪ unknown\tsafe\t-\t/tmp/safe\tunknown\tpi\t\t\t\tsafe display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=$'agent-visible-working\037%1\037idle\037100\nagent-current-blocked\037%2\037idle\037100\nagent-current-blocked\037%3\037blocked\037200'
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
@@ -611,8 +629,8 @@ assert_contains 'picker bulk kill reports protected working and blocked sessions
 # events for the same session.
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/a\twaiting\tpi\tidle' \
-  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/b\twaiting\tpi\tidle' \
+  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/a\twaiting\tpi\tidle\t\t\tduplicate a display' \
+  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/b\twaiting\tpi\tidle\t\t\tduplicate b display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
@@ -622,8 +640,8 @@ assert_eq 'picker bulk kill de-duplicates matched session rows' '1' "$(grep -c $
 # state, because neither row represents a managed live session.
 reset_mocks
 printf '%s\n' \
-  $'2\tpane\t%9\t🟣 manual \tmanual\t-\t/tmp/manual\tpane running pi\tpi\t' \
-  $'4\thistory\t/tmp/session.jsonl\t📜 history\tproject\t1d\t/tmp/project\ttitle\tpi' \
+  $'2\tpane\t%9\t🟣 manual \tmanual\t-\t/tmp/manual\tpane running pi\tpi\t\t\t\tmanual display' \
+  $'4\thistory\t/tmp/session.jsonl\t📜 history\tproject\t1d\t/tmp/project\ttitle\tpi\t\t/tmp/project\tresume-id\thistory display' \
   >"$matched_file"
 AGENT_DAEMON_BINARY="$TMP_ROOT/missing-daemon"
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
@@ -633,10 +651,37 @@ assert_eq 'picker bulk kill treats manual and history matches as a no-op' '0' "$
 assert_not_contains 'picker bulk kill never kills from manual or history rows' "$(<"$TMUX_LOG")" 'kill-session'
 assert_contains 'picker bulk kill reports when the match set has no managed sessions' "$(<"$TMUX_LOG")" 'no managed agent sessions in the current match set'
 
+# Malformed fzf data aborts the entire destructive action before daemon state
+# is requested or any valid session in the same match set is killed.
+reset_mocks
+printf '%s\n' \
+  $'2\tsession\tagent-valid\t🟢 idle   \tvalid\t1m\t/tmp/valid\twaiting\tpi\tidle\t\t\tvalid display' \
+  $'2\tsession\tagent-truncated' \
+  >"$matched_file"
+run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+rc="$?"
+assert_eq 'picker bulk kill fails on a truncated matched row' '1' "$rc"
+assert_not_contains 'picker bulk kill kills nothing when one matched row is truncated' "$(<"$TMUX_LOG")" 'kill-session'
+assert_contains 'picker bulk kill reports malformed matched rows' "$(<"$TMUX_LOG")" 'matched picker rows are malformed'
+
+reset_mocks
+printf '%s\n' $'2\tsession\tagent-tab-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\ttab\twaiting\tpi\tworking\t\t\ttab-shifted display' >"$matched_file"
+run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+rc="$?"
+assert_eq 'picker bulk kill fails when a tab shifts matched row fields' '1' "$rc"
+assert_not_contains 'picker bulk kill cannot bypass protected state through a tab-shifted path' "$(<"$TMUX_LOG")" 'kill-session'
+
+reset_mocks
+printf '%s\n' $'2\tsession\tagent-newline-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\nnewline\twaiting\tpi\tworking\t\t\tnewline-shifted display' >"$matched_file"
+run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+rc="$?"
+assert_eq 'picker bulk kill fails when a newline splits a matched row' '1' "$rc"
+assert_not_contains 'picker bulk kill cannot bypass protected state through a newline-split path' "$(<"$TMUX_LOG")" 'kill-session'
+
 # Current state is a destructive-operation boundary: unavailable or malformed
 # daemon output aborts before any matched session is killed.
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t\t\tsafe display' >"$matched_file"
 AGENT_DAEMON_BINARY="$TMP_ROOT/missing-daemon"
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
 rc="$?"
@@ -645,7 +690,7 @@ assert_eq 'picker bulk kill fails when current daemon state is unavailable' '1' 
 assert_not_contains 'picker bulk kill kills nothing when daemon state is unavailable' "$(<"$TMUX_LOG")" 'kill-session'
 
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t\t\tsafe display' >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=$'agent-safe\037%1\037working\037not-a-timestamp'
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
 rc="$?"
@@ -654,11 +699,11 @@ assert_not_contains 'picker bulk kill kills nothing on malformed daemon state' "
 assert_contains 'picker bulk kill reports malformed daemon state' "$(<"$TMUX_LOG")" 'daemon state could not be validated'
 
 # Partial tmux failure is reported accurately, and only successful kills are
-# included in the asynchronous lifecycle batch.
+# included in the synchronous lifecycle batch.
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-fail\t🟢 idle   \tfail\t1m\t/tmp/fail\twaiting\tpi\tidle' \
-  $'2\tsession\tagent-ok\t🟢 idle   \tok\t1m\t/tmp/ok\twaiting\tpi\tidle' \
+  $'2\tsession\tagent-fail\t🟢 idle   \tfail\t1m\t/tmp/fail\twaiting\tpi\tidle\t\t\tfail display' \
+  $'2\tsession\tagent-ok\t🟢 idle   \tok\t1m\t/tmp/ok\twaiting\tpi\tidle\t\t\tok display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 TMUX_MOCK_FAIL_TARGETS='=agent-fail'
@@ -668,19 +713,20 @@ log_contents="$(<"$TMUX_LOG")"
 assert_eq 'picker bulk kill fails when a matched session could not be killed' '1' "$rc"
 assert_contains 'picker bulk kill continues after one tmux kill failure' "$log_contents" $'kill-session\t-t\t=agent-ok'
 assert_contains 'picker bulk kill reports the partial failure' "$log_contents" 'killed 1 matched session(s), skipped 0 working/blocked, 1 could not be killed'
-exit_report_log="$(grep $'^run-shell\t-b\t' "$TMUX_LOG" || true)"
+exit_report_log="$(<"$DAEMON_LOG")"
 assert_contains 'picker bulk kill reports successful sessions to the daemon' "$exit_report_log" 'agent-ok'
 assert_not_contains 'picker bulk kill does not report a failed kill as exited' "$exit_report_log" 'agent-fail'
 
-# Lifecycle scheduling is best-effort after the irreversible tmux operations.
+# A lifecycle failure occurs after irreversible tmux operations, so the command
+# returns an explicit boundary error and reports that the kill still completed.
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-report-unavailable\t🟢 idle   \treport\t1m\t/tmp/report\twaiting\tpi\tidle' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-report-unavailable\t🟢 idle   \treport\t1m\t/tmp/report\twaiting\tpi\tidle\t\t\treport display' >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
-TMUX_MOCK_FAIL_RUN_SHELL=1
+DAEMON_MOCK_FAIL_SEND=1
 run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
 rc="$?"
-assert_eq 'picker bulk kill remains successful when lifecycle scheduling fails after a kill' '0' "$rc"
-assert_contains 'picker bulk kill still reports the completed kill when lifecycle scheduling fails' "$(<"$TMUX_LOG")" 'killed 1 matched session(s), skipped 0 working/blocked'
+assert_eq 'picker bulk kill fails when synchronous lifecycle reporting fails after a kill' '1' "$rc"
+assert_contains 'picker bulk kill reports completed kill and lifecycle failure' "$(<"$TMUX_LOG")" 'killed 1 matched session(s), skipped 0 working/blocked; daemon exit report failed'
 
 reset_mocks
 run_bash 'scripts/picker.sh test-client' >/dev/null
