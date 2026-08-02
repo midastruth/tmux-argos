@@ -301,13 +301,28 @@ case "$cmd" in
     [ -z "${TMUX_MOCK_FAIL_REFRESH_CLIENT:-}" ]
     ;;
   if-shell)
+    # The final two arguments are the then/else tmux commands; options such as
+    # -F and -t may add positional arguments before them.
+    if_shell_args=("$@")
+    if_shell_count="${#if_shell_args[@]}"
+    then_command="${if_shell_args[$((if_shell_count - 2))]:-}"
+    else_command="${if_shell_args[$((if_shell_count - 1))]:-}"
     if [ "${TMUX_MOCK_IF_SHELL_RESULT:-committed}" = committed ]; then
-      log '__if-shell-then__' "${3:-}"
-      printf '%s' committed
+      log '__if-shell-then__' "$then_command"
+      if [[ "$then_command" == kill-session\ -t\ * ]]; then
+        target="${then_command#kill-session -t }"
+        target="${target%% *}"
+        target="${target#=}"
+        log 'kill-session' '-t' "$target"
+        target_should_fail "$target" && exit 1
+      fi
     else
-      log '__if-shell-else__' "${4:-}"
-      printf '%s' stale
+      log '__if-shell-else__' "$else_command"
+      case "$else_command" in
+      'display-message -p '*) printf '%s' "${else_command#display-message -p }" ;;
+      esac
     fi
+    exit 0
     ;;
   kill-session)
     # Model a session that vanished or that tmux refuses to kill, so callers can

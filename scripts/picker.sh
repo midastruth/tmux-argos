@@ -388,30 +388,32 @@ parse_duration_seconds() {
   printf '%s' "$seconds"
 }
 
-# latest_daemon_session_change <session>
-# Sets daemon_at in the caller's scope to the newest changedAt across every
-# daemon record naming <session>, and returns 0; returns 1 with daemon_at
-# cleared when the snapshot holds no usable record.
+# latest_cleanup_safe_daemon_change <session>
+# Sets daemon_at in the caller's scope to the newest usable changedAt for
+# <session>. Returns 0 only when at least one usable record exists and every
+# usable record is explicitly idle or done.
 #
-# Row rendering uses lookup_daemon_state, which stops at the first matching
-# record. Daemon records come from a HashMap, so their order is arbitrary, and
-# one managed session can own several at once (a screen record per codex/claude
-# pane alongside an event record per pi process generation). Arbitrary order
-# only jitters a status label while rendering, but on the kill path it could
-# select a week-old record for a session that reported activity a minute ago and
-# destroy live work, so take the maximum here.
-latest_daemon_session_change() {
+# One managed session can own several agents at once. Even an older working,
+# blocked, or unknown record makes the whole session ineligible: choosing only
+# the newest record could kill a long-running agent because another pane changed
+# to idle more recently. This also makes HashMap serialization order irrelevant.
+latest_cleanup_safe_daemon_change() {
   local session="$1" record_session record_pane record_state record_changed
+  local cleanup_state_safe=1
   daemon_at=''
   while IFS=$'\037' read -r record_session record_pane record_state record_changed; do
     [ -n "$record_state" ] || continue
     [ "$record_session" = "$session" ] || continue
     [[ "$record_changed" =~ ^[0-9]+$ ]] || continue
+    case "$record_state" in
+    idle|done) ;;
+    *) cleanup_state_safe=0 ;;
+    esac
     if [ -z "$daemon_at" ] || [ "$record_changed" -gt "$daemon_at" ]; then
       daemon_at="$record_changed"
     fi
   done <<< "$daemon_records"
-  [ -n "$daemon_at" ]
+  [ -n "$daemon_at" ] && [ "$cleanup_state_safe" = 1 ]
 }
 
 # stale_session_targets <max-age-seconds> <now>
@@ -422,6 +424,8 @@ latest_daemon_session_change() {
 #     sessions, and history rows are saved transcripts rather than processes;
 #   - unattached sessions only, because a session someone is watching can be
 #     alive while reporting no state change for days;
+#   - sessions whose daemon states are all explicitly idle or done only;
+#     any working, blocked, or unknown record prevents the bulk kill;
 #   - sessions the daemon snapshot knows about only, with a positive changedAt:
 #     an unknown timestamp ('-' in the picker) is no evidence of staleness, and
 #     the daemon serializes a missing changedAt as 0 rather than omitting the
@@ -445,7 +449,7 @@ stale_session_targets() {
     [ -n "$session" ] || continue
     is_managed_session "$session" || continue
     [ "$attached" = 0 ] || continue
-    latest_daemon_session_change "$session" || continue
+    latest_cleanup_safe_daemon_change "$session" || continue
     [ "$daemon_at" -gt 0 ] || continue
     [ "$((now - daemon_at))" -ge "$max_age" ] || continue
     printf '%s\t%s\n' "$session" "$daemon_at"
@@ -464,6 +468,33 @@ stale_targets_include_session() {
   return 1
 }
 
+# kill_unattached_session <session>
+# Uses one tmux server-side conditional to check attachment state and perform the
+# kill, narrowing the client-side check/kill race. Returns 0 when killed, 2 when
+# the session became attached, and 1 when tmux could not evaluate or kill it.
+kill_unattached_session() {
+  local session="$1" exact_session pane_target target_q marker result event_q
+  exact_session="=$session"
+  # if-shell -t accepts a pane target, so the trailing colon is required for
+  # tmux's exact-session syntax. Without it, '=name' has no format context and
+  # session_attached expands empty.
+  pane_target="=$session:"
+  target_q="$(printf '%q' "$exact_session")"
+  marker='__tmux_agents_cleanup_attached__'
+  if ! result="$(tmux if-shell -F -t "$pane_target" \
+    '#{==:#{session_attached},0}' \
+    "kill-session -t $target_q" \
+    "display-message -p $marker" 2>/dev/null)"; then
+    return 1
+  fi
+  if [ "$result" = "$marker" ]; then
+    return 2
+  fi
+  event_q="$(printf '%q' "$DIR/event.sh")"
+  tmux run-shell -b "$event_q exited-session $(printf '%q' "$session")" 2>/dev/null || true
+  return 0
+}
+
 # kill_stale_sessions
 # ctrl-r handler: kill every managed session idle for at least
 # @agent_stale_kill_age, after an explicit confirmation typed in the picker's
@@ -472,7 +503,7 @@ stale_targets_include_session() {
 # because fzf redraws over terminal output as soon as this returns.
 kill_stale_sessions() {
   local configured max_age now targets revalidated_targets
-  local killed failed skipped session state_at ago reply
+  local killed failed skipped session state_at ago reply kill_status
   configured="$(get_tmux_option @agent_stale_kill_age "$STALE_KILL_AGE_DEFAULT")"
   if ! max_age="$(parse_duration_seconds "$configured")"; then
     tmux display-message "tmux-agents-session-manager: invalid @agent_stale_kill_age '$configured' (use 900, 90s, 45m, 12h or 7d)"
@@ -527,11 +558,13 @@ kill_stale_sessions() {
       skipped=$((skipped + 1))
       continue
     fi
-    if kill_target session "$session"; then
-      killed=$((killed + 1))
-    else
-      failed=$((failed + 1))
-    fi
+    kill_unattached_session "$session"
+    kill_status=$?
+    case "$kill_status" in
+    0) killed=$((killed + 1)) ;;
+    2) skipped=$((skipped + 1)) ;;
+    *) failed=$((failed + 1)) ;;
+    esac
   done <<< "$targets"
   if [ "$failed" -gt 0 ]; then
     if [ "$skipped" -gt 0 ]; then

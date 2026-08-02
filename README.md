@@ -112,26 +112,31 @@ irreversible:
   own sessions, and history rows are saved transcripts rather than live processes;
 - attached sessions are always skipped, since a session you are watching can be
   alive while reporting no state change for days;
+- only sessions whose daemon records are all explicitly `idle` or `done` are
+  eligible. Any `working`, `blocked`, or unknown record makes the entire session
+  ineligible, including an older record for a long-running agent;
 - only the state daemon's snapshot decides a session's age. A session the daemon
   does not know about (its age renders as `-`) is skipped, and if the snapshot
   cannot be read at all the cleanup aborts and says so on the status line. The
   tmux option `@agent_state_at` is written once when a session is created and is
   never refreshed for `codex`/`claude` sessions, so falling back to it would
   report an actively working session as idle since its launch day;
-- when a session has several daemon records (for example a `codex` pane and a
-  `pi` pane in one session), the **newest** one decides its age.
+- when a session has several eligible daemon records (for example a `codex`
+  pane and a `pi` pane in one session), the **newest** timestamp decides its age.
 
 After `y` is entered, the picker reads tmux attachment state and daemon activity
-again. It kills only sessions that were shown in the confirmation list and are
-still unattached and stale; sessions that became attached or active are skipped,
-and newly stale sessions wait for a future confirmation.
+again. It considers only sessions that were shown in the confirmation list and
+are still stale. Immediately before each kill, a tmux server-side `if-shell -F`
+checks attachment state and performs the kill in the same command queue, further
+narrowing the attachment race. Sessions that became attached or active are
+skipped, and newly stale sessions wait for a future confirmation.
 
 The summary reports only the sessions that were actually killed, plus any that
 became ineligible; if tmux refuses a kill, the count of failures is reported too.
 
-The age it compares against is the last reported state change, not terminal
-activity. Killed agents lose their in-memory context, but their transcripts stay
-resumable from the history tab (`Tab`).
+For eligible `idle`/`done` sessions, the age it compares against is the last
+reported state change, not terminal activity. Killed agents lose their in-memory
+context, but their transcripts stay resumable from the history tab (`Tab`).
 
 History mode reads the native local stores for Pi (`~/.pi/agent/sessions`),
 Codex (`~/.codex/sessions`), and Claude (`~/.claude/projects`). Its preview
