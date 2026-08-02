@@ -6,6 +6,7 @@
 #   TMUX_MOCK_LOG              append every invocation (tab-separated) to file
 #   TMUX_MOCK_OPTIONS          "key=value" lines for global show-option
 #   TMUX_MOCK_TARGET_OPTIONS   "target|key=value" lines for -t show-option(s)
+#                              and target-scoped display-message formats
 #   TMUX_MOCK_STATUS_OPTIONS   output for display-message with -F
 #   TMUX_MOCK_LIST_SESSIONS    output for list-sessions
 #   TMUX_MOCK_LIST_PANES       output for list-panes (single fixture)
@@ -167,6 +168,8 @@ run_group() {
         printf '__agent_pane__ %s %s' "${target:-}" "${TMUX_MOCK_PANE_VISIBLE:-0 0 0}"
       elif [[ "$joined" == *'#{session_attached}'* ]]; then
         printf '%s' "${TMUX_MOCK_PANE_VISIBLE:-0 0 0}"
+      elif [[ "$joined" == *'#{@agent_state}'* ]]; then
+        target_kv_get "$target" '@agent_state' || true
       elif [[ "$joined" == *'#{session_id}'* && "$joined" == *'#{session_name}'* ]]; then
         printf '%s\t%s' "${TMUX_MOCK_PANE_SESSION_ID:-\$1}" "${TMUX_MOCK_PANE_SESSION:-${TMUX_MOCK_CURRENT_SESSION:-}}"
       elif [[ "$joined" == *'#{session_name}'* ]]; then

@@ -105,6 +105,18 @@ short_path() {
   esac
 }
 
+# sanitize_picker_field <value>
+# Sets picker_field to a single-line, tab-free value suitable for the fixed fzf
+# row schema. tmux format substitutions perform the same sanitization before
+# list output is parsed; this second boundary check also protects generated rows
+# when a tmux implementation or test double returns raw control characters.
+sanitize_picker_field() {
+  picker_field="$1"
+  picker_field="${picker_field//$'\t'/ }"
+  picker_field="${picker_field//$'\n'/ }"
+  picker_field="${picker_field//$'\r'/ }"
+}
+
 # classify <state>
 # Sets rank, label, and desc in the caller's scope. label is the padded status
 # badge; desc is the trailing note shown after the path. Shared so managed
@@ -165,10 +177,16 @@ pane_still_exists() {
 }
 
 emit_managed_rows() {
-  local now s session_id state at path cmd tool instance name rank label desc ago disp_path daemon_state daemon_at
+  local now s session_id state at path cmd tool instance name rank label desc ago disp_path daemon_state daemon_at picker_field
+  local tmux_format
   now=$(picker_now)
-  tmux list-sessions -F '#{session_name}	#{session_id}	#{@agent_state}	#{@agent_state_at}	#{pane_current_path}	#{@agent_tool}	#{pane_current_command}	#{@agent_instance}' 2>/dev/null |
+  # Replace row separators inside tmux metadata before parsing. In particular,
+  # pane paths may legally contain tabs or newlines and must never shift the
+  # immutable session ID into an action field chosen by display metadata.
+  tmux_format=$'#{s/[\t\n\r]/ /:session_name}\t#{session_id}\t#{s/[\t\n\r]/ /:@agent_state}\t#{s/[\t\n\r]/ /:@agent_state_at}\t#{s/[\t\n\r]/ /:pane_current_path}\t#{s/[\t\n\r]/ /:@agent_tool}\t#{s/[\t\n\r]/ /:pane_current_command}\t#{s/[\t\n\r]/ /:@agent_instance}'
+  tmux list-sessions -F "$tmux_format" 2>/dev/null |
     while IFS=$'\t' read -r s session_id state at path tool cmd instance; do
+      [[ "$session_id" =~ ^\$[0-9]+$ ]] || continue
       is_managed_session "$s" || continue
       name=${path##*/}
       if lookup_daemon_state session "$session_id"; then
@@ -181,6 +199,22 @@ emit_managed_rows() {
       classify "$state"
       humanize_ago "$at" "$now"
       short_path "$path"
+      sanitize_picker_field "$s"
+      s="$picker_field"
+      sanitize_picker_field "$label"
+      label="$picker_field"
+      sanitize_picker_field "$name"
+      name="$picker_field"
+      sanitize_picker_field "$ago"
+      ago="$picker_field"
+      sanitize_picker_field "$disp_path"
+      disp_path="$picker_field"
+      sanitize_picker_field "$desc"
+      desc="$picker_field"
+      sanitize_picker_field "$tool"
+      tool="$picker_field"
+      sanitize_picker_field "$state"
+      state="$picker_field"
       # Fields 1-9 are display metadata, field 10 keeps the raw state, and
       # field 11 identifies this tmux session instance even if its name is
       # deleted and reused while a destructive action awaits confirmation.
@@ -190,9 +224,11 @@ emit_managed_rows() {
 }
 
 emit_manual_rows() {
-  local now panes s pane cmd ppid path state at opts line base name rank label desc ago disp_path daemon_state daemon_at
+  local now panes s pane cmd ppid path state at opts line base name rank label desc ago disp_path daemon_state daemon_at picker_field
+  local tmux_format
   now=$(picker_now)
-  panes="$(tmux list-panes -a -F '#{session_name}	#{pane_id}	#{pane_current_command}	#{pane_pid}	#{pane_current_path}' 2>/dev/null)" || return 1
+  tmux_format=$'#{s/[\t\n\r]/ /:session_name}\t#{pane_id}\t#{s/[\t\n\r]/ /:pane_current_command}\t#{pane_pid}\t#{s/[\t\n\r]/ /:pane_current_path}'
+  panes="$(tmux list-panes -a -F "$tmux_format" 2>/dev/null)" || return 1
 
   # Snapshot ps at most once, and only when at least one non-managed pane is
   # running a configured wrapper command. This preserves the cheap direct-command
@@ -200,7 +236,7 @@ emit_manual_rows() {
   AGENT_PS_TABLE=''
   AGENT_PS_TABLE_READY=0
   while IFS=$'\t' read -r s pane cmd ppid path; do
-    [ -z "$pane" ] && continue
+    [[ "$pane" =~ ^%[0-9]+$ ]] || continue
     is_managed_session "$s" && continue
     if is_wrapper_command "${cmd##*/}"; then
       # shellcheck disable=SC2034 # resolve_pane_agent reads these via dynamic scope
@@ -212,6 +248,7 @@ emit_manual_rows() {
   done <<< "$panes"
 
   while IFS=$'\t' read -r s pane cmd ppid path; do
+    [[ "$pane" =~ ^%[0-9]+$ ]] || continue
     # Managed sessions are already listed as managed agent sessions.
     is_managed_session "$s" && continue
     # Resolve the agent name, including wrappers (codex runs under node) by
@@ -249,6 +286,20 @@ emit_manual_rows() {
     fi
     humanize_ago "$at" "$now"
     short_path "$path"
+    sanitize_picker_field "$label"
+    label="$picker_field"
+    sanitize_picker_field "$name"
+    name="$picker_field"
+    sanitize_picker_field "$ago"
+    ago="$picker_field"
+    sanitize_picker_field "$disp_path"
+    disp_path="$picker_field"
+    sanitize_picker_field "$desc"
+    desc="$picker_field"
+    sanitize_picker_field "$base"
+    base="$picker_field"
+    sanitize_picker_field "$state"
+    state="$picker_field"
     printf '%s\tpane\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$rank" "$pane" "$label" "$name" "$ago" "$disp_path" "$desc" "$base" "$state"
   done <<< "$panes"
@@ -383,6 +434,18 @@ report_session_exits() {
   "$DIR/event.sh" exited-sessions "${event_arguments[@]}" >/dev/null 2>&1
 }
 
+read_current_managed_session_state() {
+  local session_id="$1"
+  if ! current_session_state="$(tmux display-message -p -t "$session_id" '#{@agent_state}' 2>/dev/null)"; then
+    current_session_state=''
+    return 1
+  fi
+  case "$current_session_state" in
+  ''|idle|done|working|blocked) return 0 ;;
+  *) return 2 ;;
+  esac
+}
+
 # kill_matched_sessions <fzf-matched-rows-file>
 # Kills every managed session in fzf's current match set, including the whole
 # live list when the query is empty. Manual panes and history rows are ignored.
@@ -393,6 +456,7 @@ kill_matched_sessions() {
   local matched_file="$1" matched_session_rows matched_session_count confirmation_reply
   local daemon_records validated_targets marker
   local killed failed skipped lifecycle_report_failed killed_session_ids session session_id protected
+  local current_session_state current_state_result
 
   if [ -z "$matched_file" ] || [ ! -r "$matched_file" ]; then
     tmux display-message 'tmux-argos: matched picker rows could not be read; bulk kill aborted'
@@ -514,6 +578,25 @@ kill_matched_sessions() {
       skipped=$((skipped + 1))
       continue
     fi
+
+    # Pi writes this session-scoped mirror before submitting the daemon event.
+    # Read it immediately before deletion to close that transition window.
+    read_current_managed_session_state "$session_id"
+    current_state_result=$?
+    if [ "$current_state_result" -eq 1 ]; then
+      failed=$((failed + 1))
+      continue
+    fi
+    if [ "$current_state_result" -eq 2 ]; then
+      tmux display-message "tmux-argos: invalid current state for $session_id; remaining bulk kill aborted"
+      failed=$((failed + 1))
+      break
+    fi
+    if [ "$current_session_state" = working ] || [ "$current_session_state" = blocked ]; then
+      skipped=$((skipped + 1))
+      continue
+    fi
+
     if tmux kill-session -t "$session_id" 2>/dev/null; then
       killed=$((killed + 1))
       if [ -n "$killed_session_ids" ]; then

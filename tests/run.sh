@@ -260,6 +260,40 @@ assert_contains 'picker --list emits managed session row identity' "$out" $'sess
 assert_contains 'picker --list shortens home path and shows numbered tool' "$out" $'~/proj\tneeds input\tpi-1'
 assert_not_contains 'picker --list ignores unmanaged sessions' "$out" $'session\tother'
 
+# tmux metadata may contain row separators. Picker rows must sanitize those
+# values before fzf sees them so action fields retain the real immutable ID.
+reset_mocks
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+PICKER_NOW=100
+TMUX_MOCK_LIST_SESSIONS=$'agent-injected\t$31\tidle\t100\t/tmp/with\tignored\tignored\t$99\tpi\tpi\t1'
+injected_row="$(run_bash 'scripts/picker.sh --list')"
+assert_eq 'picker sanitizes tab-containing metadata to the fixed row schema' '13' \
+  "$(printf '%s\n' "$injected_row" | awk -F '\t' '{ print NF }')"
+assert_eq 'picker tab-containing metadata retains the trusted session ID' "$(printf '$%s' 31)" \
+  "$(printf '%s\n' "$injected_row" | cut -f11)"
+
+reset_mocks
+FZF_MOCK_OUTPUT="$injected_row"
+run_bash 'scripts/picker.sh test-client' >/dev/null
+assert_contains 'picker Enter cannot open a session ID injected through metadata' "$(<"$TMUX_LOG")" $'attach-session\t-t\t$31'
+assert_not_contains 'picker Enter ignores an injected metadata session ID' "$(<"$TMUX_LOG")" $'attach-session\t-t\t$99'
+
+reset_mocks
+injected_kind="$(printf '%s\n' "$injected_row" | cut -f2)"
+injected_target="$(printf '%s\n' "$injected_row" | cut -f3)"
+injected_session_id="$(printf '%s\n' "$injected_row" | cut -f11)"
+run_bash "scripts/picker.sh --kill '$injected_kind' '$injected_target' '$injected_session_id'" >/dev/null
+assert_contains 'picker ctrl-x cannot kill a session ID injected through metadata' "$(<"$TMUX_LOG")" $'kill-session\t-t\t$31'
+assert_not_contains 'picker ctrl-x ignores an injected metadata session ID' "$(<"$TMUX_LOG")" $'kill-session\t-t\t$99'
+
+reset_mocks
+matched_file="$TMP_ROOT/injected-matched-row"
+printf '%s\n' "$injected_row" >"$matched_file"
+DAEMON_SNAPSHOT_ROWS=''
+run_bash "printf 'y\\n' | scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+assert_contains 'picker ctrl-r cannot kill a session ID injected through metadata' "$(<"$TMUX_LOG")" $'kill-session\t-t\t$31'
+assert_not_contains 'picker ctrl-r ignores an injected metadata session ID' "$(<"$TMUX_LOG")" $'kill-session\t-t\t$99'
+
 # picker.sh age column scales seconds/minutes/hours/days.
 reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
@@ -638,7 +672,8 @@ run_confirmed_bulk_kill >/dev/null
 rc="$?"
 log_contents="$(<"$TMUX_LOG")"
 assert_eq 'picker bulk kill fails safely when the matched session ID has exited' '1' "$rc"
-assert_contains 'picker bulk kill attempts only the original immutable ID' "$log_contents" $'kill-session\t-t\t$30'
+assert_contains 'picker bulk kill revalidates only the original immutable ID' "$log_contents" $'display-message\t-p\t-t\t$30\t#{@agent_state}'
+assert_not_contains 'picker bulk kill does not issue a kill for an exited immutable ID' "$log_contents" $'kill-session\t-t\t$30'
 assert_not_contains 'picker bulk kill never kills a same-name replacement' "$log_contents" $'kill-session\t-t\t=agent-reused'
 
 # Both the status embedded in the displayed row and a fresh daemon snapshot can
@@ -657,6 +692,21 @@ assert_not_contains 'picker bulk kill keeps a session displayed as working' "$lo
 assert_not_contains 'picker bulk kill keeps a renamed session with a current blocked daemon record' "$log_contents" $'kill-session\t-t\t$15'
 assert_contains 'picker bulk kill allows a matched session with unknown state' "$log_contents" $'kill-session\t-t\t$16'
 assert_contains 'picker bulk kill reports protected working and blocked sessions' "$log_contents" 'killed 1 matched session(s), skipped 2 working/blocked'
+
+# Pi updates the tmux mirror before sending its daemon event. Revalidate that
+# mirror immediately before deletion so the intervening working transition is
+# protected even while both the row and daemon snapshot are still idle.
+reset_mocks
+printf '%s\n' \
+  $'2\tsession\tagent-transitioning\t🟢 idle   \ttransitioning\t1m\t/tmp/transitioning\twaiting\tpi\tidle\t$25\t\ttransitioning display' \
+  >"$matched_file"
+DAEMON_SNAPSHOT_ROWS=$'agent-transitioning\037$25\037%1\037idle\037100'
+TMUX_MOCK_TARGET_OPTIONS=$'$25|@agent_state=working'
+run_confirmed_bulk_kill >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'picker bulk kill reads the current session mirror immediately before termination' "$log_contents" $'display-message\t-p\t-t\t$25\t#{@agent_state}'
+assert_not_contains 'picker bulk kill protects a working tmux-mirror transition' "$log_contents" $'kill-session\t-t\t$25'
+assert_contains 'picker bulk kill reports the mirror-protected transition' "$log_contents" 'killed 0 matched session(s), skipped 1 working/blocked'
 
 # Duplicate fzf rows must never produce duplicate kill attempts or lifecycle
 # events for the same session.

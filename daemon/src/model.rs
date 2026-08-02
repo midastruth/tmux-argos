@@ -498,17 +498,31 @@ impl StateCenter {
     }
 
     fn remove_exited_records(&mut self, rows: &[PaneRow], now: Instant) {
-        let live_panes: HashSet<&str> = rows.iter().map(|row| row.pane_id.as_str()).collect();
+        let live_panes: HashMap<&str, &PaneRow> =
+            rows.iter().map(|row| (row.pane_id.as_str(), row)).collect();
         let live_sessions: HashSet<&str> = rows.iter().map(|row| row.session_id.as_str()).collect();
+
+        // A pane can be moved between sessions without its agent process
+        // exiting. Reconcile ownership from the pane snapshot before deciding
+        // which generations exited so the old session's closure cannot retire
+        // a still-running event generation.
+        for record in self.agents.values_mut() {
+            let Some(pane_id) = record.pane_id.as_deref() else {
+                continue;
+            };
+            let Some(row) = live_panes.get(pane_id) else {
+                continue;
+            };
+            record.session_id.clone_from(&row.session_id);
+            record.session_name.clone_from(&row.session_name);
+        }
+
         let exited: Vec<String> = self
             .agents
             .iter()
-            .filter(|(_, record)| {
-                !live_sessions.contains(record.session_id.as_str())
-                    || !record
-                        .pane_id
-                        .as_deref()
-                        .is_some_and(|pane| live_panes.contains(pane))
+            .filter(|(_, record)| match record.pane_id.as_deref() {
+                Some(pane_id) => !live_panes.contains_key(pane_id),
+                None => !live_sessions.contains(record.session_id.as_str()),
             })
             .map(|(identity, _)| identity.clone())
             .collect();
@@ -1492,6 +1506,55 @@ mod tests {
 
         assert_eq!(state.agents.len(), 1);
         assert_eq!(state.agents.values().next().unwrap().session_id, "$2");
+    }
+
+    #[test]
+    fn live_reconciliation_moves_an_event_generation_with_its_pane() {
+        let mut state = center();
+        state
+            .apply(Request::Report {
+                tool: "pi".into(),
+                pane_id: "%1".into(),
+                process_generation: "generation".into(),
+                sequence: 1,
+                state: AgentState::Working,
+                session_id: "$1".into(),
+                session_name: "agent-old".into(),
+            })
+            .unwrap();
+        let moved_pane = PaneRow {
+            session_name: "agent-new".into(),
+            session_id: "$2".into(),
+            pane_id: "%1".into(),
+            command: "pi".into(),
+            pane_pid: 1,
+            pane_title: String::new(),
+            configured_tool: "pi".into(),
+            visible: false,
+        };
+
+        state.remove_exited_records(&[moved_pane], Instant::now());
+
+        let moved_record = state.agents.values().next().unwrap();
+        assert_eq!(moved_record.session_id, "$2");
+        assert_eq!(moved_record.session_name, "agent-new");
+        assert!(state.retired_event_generations.is_empty());
+
+        state
+            .apply(Request::Report {
+                tool: "pi".into(),
+                pane_id: "%1".into(),
+                process_generation: "generation".into(),
+                sequence: 2,
+                state: AgentState::Done,
+                session_id: "$2".into(),
+                session_name: "agent-new".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            state.agents.values().next().unwrap().state,
+            AgentState::Done
+        );
     }
 
     #[test]
