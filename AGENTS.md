@@ -29,7 +29,7 @@
 
 ## 项目结构
 
-- `agents_session_manager.tmux`：插件入口和 tmux 配置初始化。
+- `tmux-argos.tmux`：插件入口和 tmux 配置初始化。
 - `scripts/`：启动、选择器、状态管理及共享 Bash 逻辑。
 - `extensions/tmux-state.ts`：Pi 状态上报扩展。
 - `tests/run.sh`：主要 Bash 测试套件。
@@ -52,7 +52,7 @@ bash tests/perf_smoke.sh
 如果环境中安装了 ShellCheck，修改 Bash 文件后运行：
 
 ```bash
-shellcheck agents_session_manager.tmux scripts/*.sh tests/*.sh
+shellcheck tmux-argos.tmux scripts/*.sh tests/*.sh
 ```
 
 提交结果前确认测试通过，并检查文档、实现和测试描述保持一致。

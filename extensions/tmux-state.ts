@@ -26,7 +26,7 @@ function daemonBinary(): string | undefined {
   }
   try {
     const here = dirname(realpathSync(fileURLToPath(import.meta.url)));
-    const candidate = join(here, "..", "daemon", "target", "release", "tmux-agents-state-daemon");
+    const candidate = join(here, "..", "daemon", "target", "release", "tmux-argos-state-daemon");
     return existsSync(candidate) ? candidate : undefined;
   } catch {
     return undefined;

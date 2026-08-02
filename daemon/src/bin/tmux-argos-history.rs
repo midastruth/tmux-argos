@@ -18,7 +18,7 @@ struct HistoryRecord {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("tmux-agents-history: {error}");
+        eprintln!("tmux-argos-history: {error}");
         std::process::exit(1);
     }
 }
@@ -33,7 +33,7 @@ fn run() -> Result<(), String> {
             preview_record(agent, Path::new(source))
         }
         _ => Err(
-            "usage: tmux-agents-history list <pi-sessions-dir> <codex-home> <claude-home> | preview <agent> <source-file>"
+            "usage: tmux-argos-history list <pi-sessions-dir> <codex-home> <claude-home> | preview <agent> <source-file>"
                 .to_string(),
         ),
     }
@@ -44,7 +44,7 @@ fn list_records(pi_dir: &Path, codex_home: &Path, claude_home: &Path) -> Result<
     collect_pi_records(pi_dir, &mut records);
     collect_codex_records(codex_home, &mut records);
     collect_claude_records(claude_home, &mut records);
-    records.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    records.sort_by_key(|record| std::cmp::Reverse(record.updated_at));
 
     let stdout = io::stdout();
     let mut output = BufWriter::new(stdout.lock());
@@ -196,20 +196,20 @@ fn parse_codex_record(source: &Path) -> Option<HistoryRecord> {
                         .unwrap_or_default();
                 }
             }
-            Some("response_item") if first_response_prompt.is_empty() => {
-                if payload
-                    .and_then(|item| item.get("type"))
-                    .and_then(Value::as_str)
-                    == Some("message")
+            Some("response_item")
+                if first_response_prompt.is_empty()
+                    && payload
+                        .and_then(|item| item.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("message")
                     && payload
                         .and_then(|item| item.get("role"))
                         .and_then(Value::as_str)
-                        == Some("user")
-                {
-                    first_response_prompt = payload
-                        .map(|item| content_text(item.get("content")))
-                        .unwrap_or_default();
-                }
+                        == Some("user") =>
+            {
+                first_response_prompt = payload
+                    .map(|item| content_text(item.get("content")))
+                    .unwrap_or_default();
             }
             _ => {}
         }
@@ -565,7 +565,7 @@ mod tests {
     use super::*;
     fn temporary_file(name: &str, content: &str) -> PathBuf {
         let directory = env::temp_dir().join(format!(
-            "tmux-agents-history-test-{}-{}",
+            "tmux-argos-history-test-{}-{}",
             std::process::id(),
             name
         ));

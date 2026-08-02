@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helpers for tmux-agents-session-manager.
+# Shared helpers for tmux-argos.
 
 # Absolute directory of this helpers file, used by lifecycle event helpers.
 if [ -z "${STATUS_HELPERS_DIR:-}" ]; then

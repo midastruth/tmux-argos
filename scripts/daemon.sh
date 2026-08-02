@@ -9,10 +9,10 @@ ROOT="$(cd "$DIR/.." && pwd)"
 if [ -n "${AGENT_DAEMON_BINARY:-}" ]; then
   binary="$AGENT_DAEMON_BINARY"
 else
-  binary="$(get_tmux_option @agent_daemon_binary "$ROOT/daemon/target/release/tmux-agents-state-daemon")"
+  binary="$(get_tmux_option @agent_daemon_binary "$ROOT/daemon/target/release/tmux-argos-state-daemon")"
 fi
 if [ ! -x "$binary" ]; then
-  tmux display-message "tmux-agents-session-manager: daemon binary missing; run cargo build --release --manifest-path $ROOT/daemon/Cargo.toml" 2>/dev/null || true
+  tmux display-message "tmux-argos: daemon binary missing; run cargo build --release --manifest-path $ROOT/daemon/Cargo.toml" 2>/dev/null || true
   exit 1
 fi
 exec "$binary" "$@"
