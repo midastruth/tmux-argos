@@ -12,7 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}/tmux-agents-tests.$$"
 MOCK_BIN="$TMP_ROOT/bin"
 TMUX_LOG="$TMP_ROOT/tmux.log"
-mkdir -p "$MOCK_BIN"
+TMUX_MOCK_STATE_DIR="$TMP_ROOT/mock-state"
+mkdir -p "$MOCK_BIN" "$TMUX_MOCK_STATE_DIR"
 : >"$TMUX_LOG"
 
 cleanup() {
@@ -30,7 +31,19 @@ cat >"$MOCK_BIN/state-daemon" <<'DAEMON_MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DAEMON_LOG"
 if [ "${1:-}" = snapshot-picker ]; then
-  printf '%s' "${DAEMON_SNAPSHOT_ROWS:-}"
+  snapshot_rows="${DAEMON_SNAPSHOT_ROWS:-}"
+  if [ "${DAEMON_SNAPSHOT_ROWS_AFTER_FIRST+x}" = x ]; then
+    count_file="${TMUX_MOCK_STATE_DIR:?}/daemon-snapshot-picker-count"
+    count=0
+    if [ -r "$count_file" ]; then
+      read -r count <"$count_file"
+    fi
+    if [ "$count" -gt 0 ]; then
+      snapshot_rows="$DAEMON_SNAPSHOT_ROWS_AFTER_FIRST"
+    fi
+    printf '%s\n' "$((count + 1))" >"$count_file"
+  fi
+  printf '%s' "$snapshot_rows"
 elif [ "${1:-}" = snapshot ]; then
   printf '%s\n' "${DAEMON_SNAPSHOT:-{\"ok\":true,\"data\":{\"records\":[]}}}"
 else
@@ -38,7 +51,7 @@ else
 fi
 DAEMON_MOCK
 chmod +x "$MOCK_BIN/state-daemon"
-export DAEMON_LOG AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
+export DAEMON_LOG TMUX_MOCK_STATE_DIR AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
 
 cat >"$MOCK_BIN/history-reader" <<'HISTORY_MOCK'
 #!/usr/bin/env bash
@@ -69,9 +82,11 @@ reset_mocks() {
   : >"$TMUX_LOG"
   : >"$DAEMON_LOG"
   : >"$FZF_LOG"
-  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS HISTORY_MOCK_ROWS
+  rm -f "$TMUX_MOCK_STATE_DIR"/*
+  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS DAEMON_SNAPSHOT_ROWS_AFTER_FIRST HISTORY_MOCK_ROWS
   unset TMUX_MOCK_OPTIONS TMUX_MOCK_TARGET_OPTIONS TMUX_MOCK_STATUS_OPTIONS \
-    TMUX_MOCK_LIST_SESSIONS TMUX_MOCK_LIST_PANES TMUX_MOCK_LIST_CLIENTS \
+    TMUX_MOCK_LIST_SESSIONS TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST \
+    TMUX_MOCK_LIST_PANES TMUX_MOCK_LIST_CLIENTS \
     TMUX_MOCK_LIST_PANES_PICKER TMUX_MOCK_LIST_PANES_STATUS \
     TMUX_MOCK_HAS_SESSION TMUX_MOCK_EXISTING_SESSIONS TMUX_MOCK_CURRENT_SESSION \
     TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE TMUX_MOCK_SERVER_PID \
@@ -567,6 +582,48 @@ assert_contains 'picker stale cleanup kills an unattached session idle past the 
 assert_not_contains 'picker stale cleanup keeps a session idle below the threshold' "$log_contents" $'kill-session\t-t\tagent-fresh'
 assert_contains 'picker stale cleanup reports the killed session in the confirmation prompt' "$out" 'agent-old'
 assert_contains 'picker stale cleanup schedules an exit report for each killed session' "$log_contents" 'event.sh exited-session agent-old'
+
+# Revalidation after confirmation must observe attachment changes that happened
+# while the prompt was open.
+reset_mocks
+PICKER_NOW="$stale_now"
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_LIST_SESSIONS=$'agent-watched\t0'
+TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST=$'agent-watched\t1'
+DAEMON_SNAPSHOT_ROWS="agent-watched"$'\037''%1'$'\037''idle'$'\037'"$((stale_now - 8 * 86400))"$'\n'
+out="$(run_bash 'scripts/picker.sh --kill-stale' <<< 'y')"
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'picker stale cleanup confirms a session before it becomes attached' "$out" 'agent-watched'
+assert_not_contains 'picker stale cleanup skips a confirmed session that becomes attached' "$log_contents" $'kill-session\t-t\tagent-watched'
+assert_contains 'picker stale cleanup reports a session skipped after revalidation' "$log_contents" 'skipped 1 that became attached or active'
+
+# Fresh daemon activity reported while confirmation is pending also removes the
+# session from the eligible set.
+reset_mocks
+PICKER_NOW="$stale_now"
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_LIST_SESSIONS=$'agent-active\t0'
+DAEMON_SNAPSHOT_ROWS="agent-active"$'\037''%1'$'\037''idle'$'\037'"$((stale_now - 8 * 86400))"$'\n'
+DAEMON_SNAPSHOT_ROWS_AFTER_FIRST="agent-active"$'\037''%1'$'\037''working'$'\037'"$((stale_now - 60))"$'\n'
+run_bash 'scripts/picker.sh --kill-stale' <<< 'y' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_not_contains 'picker stale cleanup skips a confirmed session that reports fresh activity' "$log_contents" $'kill-session\t-t\tagent-active'
+assert_contains 'picker stale cleanup reports fresh sessions skipped after revalidation' "$log_contents" 'skipped 1 that became attached or active'
+
+# Revalidation is an intersection with the displayed list, not a new bulk
+# selection: a session that only becomes stale after the prompt is shown was
+# never confirmed and must remain running.
+reset_mocks
+PICKER_NOW="$stale_now"
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_LIST_SESSIONS=$'agent-confirmed\t0\nagent-newly-stale\t0'
+DAEMON_SNAPSHOT_ROWS="agent-confirmed"$'\037''%1'$'\037''idle'$'\037'"$((stale_now - 8 * 86400))"$'\n'"agent-newly-stale"$'\037''%2'$'\037''idle'$'\037'"$((stale_now - 60))"$'\n'
+DAEMON_SNAPSHOT_ROWS_AFTER_FIRST="agent-confirmed"$'\037''%1'$'\037''idle'$'\037'"$((stale_now - 8 * 86400))"$'\n'"agent-newly-stale"$'\037''%2'$'\037''idle'$'\037'"$((stale_now - 8 * 86400))"$'\n'
+out="$(run_bash 'scripts/picker.sh --kill-stale' <<< 'y')"
+log_contents="$(<"$TMUX_LOG")"
+assert_not_contains 'picker stale cleanup does not ask for confirmation of a fresh session' "$out" 'agent-newly-stale'
+assert_contains 'picker stale cleanup kills a confirmed session that remains stale' "$log_contents" $'kill-session\t-t\tagent-confirmed'
+assert_not_contains 'picker stale cleanup never kills a newly stale unconfirmed session' "$log_contents" $'kill-session\t-t\tagent-newly-stale'
 
 # Refusing the prompt must leave every session running.
 reset_mocks

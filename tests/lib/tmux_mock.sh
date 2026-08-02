@@ -7,7 +7,10 @@
 #   TMUX_MOCK_OPTIONS          "key=value" lines for global show-option
 #   TMUX_MOCK_TARGET_OPTIONS   "target|key=value" lines for -t show-option(s)
 #   TMUX_MOCK_STATUS_OPTIONS   output for display-message with -F
-#   TMUX_MOCK_LIST_SESSIONS    output for list-sessions
+#   TMUX_MOCK_LIST_SESSIONS    output for the first list-sessions call
+#   TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST
+#                              output for later calls when set; call state is
+#                              stored under TMUX_MOCK_STATE_DIR
 #   TMUX_MOCK_LIST_PANES       output for list-panes (single fixture)
 #   TMUX_MOCK_LIST_PANES_PICKER / TMUX_MOCK_LIST_PANES_STATUS
 #                              alternative per-caller fixtures: when either is
@@ -225,11 +228,23 @@ case "$cmd" in
     run_chain "$cmd" "$@"
     ;;
   list-sessions)
-    if [ -n "${TMUX_MOCK_LIST_SESSIONS:-}" ]; then
+    list_sessions="${TMUX_MOCK_LIST_SESSIONS:-}"
+    if [ "${TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST+x}" = x ]; then
+      count_file="${TMUX_MOCK_STATE_DIR:?}/list-sessions-count"
+      count=0
+      if [ -r "$count_file" ]; then
+        read -r count <"$count_file"
+      fi
+      if [ "$count" -gt 0 ]; then
+        list_sessions="$TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST"
+      fi
+      printf '%s\n' "$((count + 1))" >"$count_file"
+    fi
+    if [ -n "$list_sessions" ]; then
       if [[ " $* " == *$'\037'* ]]; then
-        printf '%s\n' "$TMUX_MOCK_LIST_SESSIONS" | tr '\t' '\037'
+        printf '%s\n' "$list_sessions" | tr '\t' '\037'
       else
-        printf '%s\n' "$TMUX_MOCK_LIST_SESSIONS"
+        printf '%s\n' "$list_sessions"
       fi
     fi
     exit 0

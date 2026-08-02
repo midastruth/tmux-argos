@@ -427,8 +427,9 @@ latest_daemon_session_change() {
 #     the daemon serializes a missing changedAt as 0 rather than omitting the
 #     record.
 #
-# Returns 1 without printing when the daemon snapshot cannot be read. The daemon
-# is the only live source of last-change time here: the tmux mirror
+# Returns 1 without printing when the daemon snapshot or tmux session list
+# cannot be read. The daemon is the only live source of last-change time here:
+# the tmux mirror
 # (@agent_state_at) is written once by launch.sh at session creation and is
 # never refreshed for codex/claude sessions (state.sh returns early for them,
 # the pi extension does not run there, and the daemon writes only
@@ -437,19 +438,30 @@ latest_daemon_session_change() {
 # unavailable daemon aborts the cleanup instead of degrading it.
 stale_session_targets() {
   local max_age="$1" now="$2"
-  local session attached daemon_at
+  local tmux_sessions session attached daemon_at
   daemon_records="$("$DIR/daemon.sh" snapshot-picker 2>/dev/null)" || return 1
-  tmux list-sessions -F '#{session_name}	#{session_attached}' 2>/dev/null |
-    while IFS=$'\t' read -r session attached; do
-      [ -n "$session" ] || continue
-      is_managed_session "$session" || continue
-      [ "$attached" = 0 ] || continue
-      latest_daemon_session_change "$session" || continue
-      [ "$daemon_at" -gt 0 ] || continue
-      [ "$((now - daemon_at))" -ge "$max_age" ] || continue
-      printf '%s\t%s\n' "$session" "$daemon_at"
-    done |
-    sort -t$'\t' -k2,2n
+  tmux_sessions="$(tmux list-sessions -F '#{session_name}	#{session_attached}' 2>/dev/null)" || return 1
+  while IFS=$'\t' read -r session attached; do
+    [ -n "$session" ] || continue
+    is_managed_session "$session" || continue
+    [ "$attached" = 0 ] || continue
+    latest_daemon_session_change "$session" || continue
+    [ "$daemon_at" -gt 0 ] || continue
+    [ "$((now - daemon_at))" -ge "$max_age" ] || continue
+    printf '%s\t%s\n' "$session" "$daemon_at"
+  done <<< "$tmux_sessions" | sort -t$'\t' -k2,2n
+}
+
+stale_targets_include_session() {
+  local targets="$1" expected_session="$2"
+  local session state_at
+  while IFS=$'\t' read -r session state_at; do
+    [ -n "$session" ] || continue
+    if [ "$session" = "$expected_session" ]; then
+      return 0
+    fi
+  done <<< "$targets"
+  return 1
 }
 
 # kill_stale_sessions
@@ -459,7 +471,8 @@ stale_session_targets() {
 # owns the terminal. Non-destructive outcomes report through tmux's status line
 # because fzf redraws over terminal output as soon as this returns.
 kill_stale_sessions() {
-  local configured max_age now targets killed failed session state_at ago reply
+  local configured max_age now targets revalidated_targets
+  local killed failed skipped session state_at ago reply
   configured="$(get_tmux_option @agent_stale_kill_age "$STALE_KILL_AGE_DEFAULT")"
   if ! max_age="$(parse_duration_seconds "$configured")"; then
     tmux display-message "tmux-agents-session-manager: invalid @agent_stale_kill_age '$configured' (use 900, 90s, 45m, 12h or 7d)"
@@ -467,7 +480,7 @@ kill_stale_sessions() {
   fi
   now="$(picker_now)"
   if ! targets="$(stale_session_targets "$max_age" "$now")"; then
-    tmux display-message 'tmux-agents-session-manager: daemon state unavailable; stale cleanup needs it to tell an idle session from a working one'
+    tmux display-message 'tmux-agents-session-manager: daemon state unavailable or tmux sessions could not be listed; stale cleanup aborted'
     return 1
   fi
   if [ -z "$targets" ]; then
@@ -492,13 +505,28 @@ kill_stale_sessions() {
     ;;
   esac
 
-  # A session can disappear between the confirmation prompt and the kill, and
-  # tmux can refuse the operation. Count only what actually died so a partial
-  # failure is never reported as a clean sweep.
+  # Confirmation can remain open while a listed session becomes attached or
+  # reports activity. Take fresh tmux and daemon snapshots, then intersect them
+  # with the confirmed list so neither an active session nor a newly stale,
+  # unconfirmed session is killed.
+  now="$(picker_now)"
+  if ! revalidated_targets="$(stale_session_targets "$max_age" "$now")"; then
+    tmux display-message 'tmux-agents-session-manager: live state unavailable after confirmation; no sessions were killed'
+    return 1
+  fi
+
+  # A session can still disappear after revalidation, and tmux can refuse the
+  # operation. Count only what actually died so a partial failure is never
+  # reported as a clean sweep.
   killed=0
   failed=0
+  skipped=0
   while IFS=$'\t' read -r session state_at; do
     [ -n "$session" ] || continue
+    if ! stale_targets_include_session "$revalidated_targets" "$session"; then
+      skipped=$((skipped + 1))
+      continue
+    fi
     if kill_target session "$session"; then
       killed=$((killed + 1))
     else
@@ -506,8 +534,16 @@ kill_stale_sessions() {
     fi
   done <<< "$targets"
   if [ "$failed" -gt 0 ]; then
-    tmux display-message "tmux-agents-session-manager: killed $killed agent session(s), $failed could not be killed"
+    if [ "$skipped" -gt 0 ]; then
+      tmux display-message "tmux-agents-session-manager: killed $killed agent session(s), $failed could not be killed, $skipped no longer eligible"
+    else
+      tmux display-message "tmux-agents-session-manager: killed $killed agent session(s), $failed could not be killed"
+    fi
     return 1
+  fi
+  if [ "$skipped" -gt 0 ]; then
+    tmux display-message "tmux-agents-session-manager: killed $killed agent session(s), skipped $skipped that became attached or active"
+    return 0
   fi
   tmux display-message "tmux-agents-session-manager: killed $killed agent session(s) idle for $configured"
   return 0
