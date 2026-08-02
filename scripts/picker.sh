@@ -32,30 +32,45 @@ picker_mode() {
   fi
 }
 
-if [ -n "${AGENT_HISTORY_BINARY:-}" ]; then
-  history_binary="$AGENT_HISTORY_BINARY"
-else
-  history_binary="$(expand_home_path "$(get_tmux_option @agent_history_binary "$ROOT/daemon/target/release/tmux-agents-history")")"
-fi
-export AGENT_HISTORY_BINARY="$history_binary"
+history_binary=''
 
-# Preview subprocesses are started repeatedly as fzf selection changes. Handle
-# them before loading live-picker configuration or daemon state.
+initialize_history_binary() {
+  if [ -n "$history_binary" ]; then
+    return 0
+  fi
+  if [ -n "${AGENT_HISTORY_BINARY:-}" ]; then
+    history_binary="$AGENT_HISTORY_BINARY"
+  else
+    history_binary="$(expand_home_path "$(get_tmux_option @agent_history_binary "$ROOT/daemon/target/release/tmux-agents-history")")"
+  fi
+  export AGENT_HISTORY_BINARY="$history_binary"
+}
+
+initialize_session_config() {
+  AGENT_SESSION_PREFIX="$(agent_session_prefix)"
+  export AGENT_SESSION_PREFIX
+}
+
+initialize_live_config() {
+  initialize_session_config
+  AGENT_DETECT_COMMANDS="$(detect_commands)"
+  AGENT_DETECT_WRAPPERS="$(wrapper_commands)"
+  export AGENT_DETECT_COMMANDS AGENT_DETECT_WRAPPERS
+}
+
+# Preview subprocesses are started repeatedly as fzf selection changes. Load
+# only the dependency required by the selected preview kind.
 [ "${1:-}" = '--preview' ] && {
   case "${2:-}" in
   session|pane) tmux capture-pane -ept "${3:-}" ;;
-  history) "$history_binary" preview "${4:-}" "${3:-}" 2>&1 ;;
+  history)
+    initialize_history_binary
+    "$history_binary" preview "${4:-}" "${3:-}" 2>&1
+    ;;
   history-error) printf '%s\n' 'Build the bundled history reader, then reload the plugin:' '' 'cargo build --release --manifest-path daemon/Cargo.toml' ;;
   esac
   exit 0
 }
-
-# Cache hot global options for this invocation. The picker enumerates every
-# session/pane and should not shell out to tmux for static config per row.
-AGENT_SESSION_PREFIX="$(agent_session_prefix)"
-AGENT_DETECT_COMMANDS="$(detect_commands)"
-AGENT_DETECT_WRAPPERS="$(wrapper_commands)"
-export AGENT_SESSION_PREFIX AGENT_DETECT_COMMANDS AGENT_DETECT_WRAPPERS
 
 # One lazily-loaded daemon snapshot supplies every live row. History toggles
 # and previews do not need daemon state and must stay cheap.
@@ -388,34 +403,6 @@ parse_duration_seconds() {
   printf '%s' "$seconds"
 }
 
-# latest_cleanup_safe_daemon_change <session>
-# Sets daemon_at in the caller's scope to the newest usable changedAt for
-# <session>. Returns 0 only when at least one usable record exists and every
-# usable record is explicitly idle or done.
-#
-# One managed session can own several agents at once. Even an older working,
-# blocked, or unknown record makes the whole session ineligible: choosing only
-# the newest record could kill a long-running agent because another pane changed
-# to idle more recently. This also makes HashMap serialization order irrelevant.
-latest_cleanup_safe_daemon_change() {
-  local session="$1" record_session record_pane record_state record_changed
-  local cleanup_state_safe=1
-  daemon_at=''
-  while IFS=$'\037' read -r record_session record_pane record_state record_changed; do
-    [ -n "$record_state" ] || continue
-    [ "$record_session" = "$session" ] || continue
-    [[ "$record_changed" =~ ^[0-9]+$ ]] || continue
-    case "$record_state" in
-    idle|done) ;;
-    *) cleanup_state_safe=0 ;;
-    esac
-    if [ -z "$daemon_at" ] || [ "$record_changed" -gt "$daemon_at" ]; then
-      daemon_at="$record_changed"
-    fi
-  done <<< "$daemon_records"
-  [ -n "$daemon_at" ] && [ "$cleanup_state_safe" = 1 ]
-}
-
 # stale_session_targets <max-age-seconds> <now>
 # Prints "<session>\t<last-change-epoch-seconds>" for every managed session
 # eligible for bulk cleanup, oldest first. Eligibility is deliberately narrow
@@ -442,30 +429,83 @@ latest_cleanup_safe_daemon_change() {
 # unavailable daemon aborts the cleanup instead of degrading it.
 stale_session_targets() {
   local max_age="$1" now="$2"
-  local tmux_sessions session attached daemon_at
+  local daemon_records tmux_sessions marker
   daemon_records="$("$DIR/daemon.sh" snapshot-picker 2>/dev/null)" || return 1
   tmux_sessions="$(tmux list-sessions -F '#{session_name}	#{session_attached}' 2>/dev/null)" || return 1
-  while IFS=$'\t' read -r session attached; do
-    [ -n "$session" ] || continue
-    is_managed_session "$session" || continue
-    [ "$attached" = 0 ] || continue
-    latest_cleanup_safe_daemon_change "$session" || continue
-    [ "$daemon_at" -gt 0 ] || continue
-    [ "$((now - daemon_at))" -ge "$max_age" ] || continue
-    printf '%s\t%s\n' "$session" "$daemon_at"
-  done <<< "$tmux_sessions" | sort -t$'\t' -k2,2n
+  marker='__tmux_agents_session_rows__'
+
+  # Build the daemon index once, then join it with the tmux session snapshot.
+  # The previous per-session rescan was O(sessions * records); this is linear in
+  # the combined input size. A non-idle/done record makes its entire session
+  # unsafe even if another record has a newer timestamp.
+  {
+    printf '%s\n' "$daemon_records"
+    printf '%s\n' "$marker"
+    printf '%s\n' "$tmux_sessions"
+  } | awk -v marker="$marker" -v prefix="$AGENT_SESSION_PREFIX" \
+    -v now="$now" -v max_age="$max_age" '
+      BEGIN { reading_sessions = 0 }
+      $0 == marker { reading_sessions = 1; next }
+      !reading_sessions {
+        field_count = split($0, daemon, "\037")
+        if (field_count < 4 || daemon[1] == "" || daemon[4] !~ /^[0-9]+$/) {
+          next
+        }
+        session = daemon[1]
+        if (!(session in cleanup_safe)) {
+          cleanup_safe[session] = 1
+        }
+        if (daemon[3] != "idle" && daemon[3] != "done") {
+          cleanup_safe[session] = 0
+        }
+        changed_at = daemon[4] + 0
+        if (!(session in latest_change) || changed_at > latest_change[session]) {
+          latest_change[session] = changed_at
+        }
+        next
+      }
+      reading_sessions {
+        field_count = split($0, tmux_session, "\t")
+        if (field_count < 2) {
+          next
+        }
+        session = tmux_session[1]
+        attached = tmux_session[2]
+        if (index(session, prefix) != 1 || attached != 0) {
+          next
+        }
+        if (!cleanup_safe[session] || latest_change[session] <= 0) {
+          next
+        }
+        if (now - latest_change[session] >= max_age) {
+          print session "\t" latest_change[session]
+        }
+      }
+    ' | sort -t$'\t' -k2,2n
 }
 
-stale_targets_include_session() {
-  local targets="$1" expected_session="$2"
-  local session state_at
-  while IFS=$'\t' read -r session state_at; do
-    [ -n "$session" ] || continue
-    if [ "$session" = "$expected_session" ]; then
-      return 0
-    fi
-  done <<< "$targets"
-  return 1
+# mark_revalidated_targets <revalidated-targets> <confirmed-targets>
+# Appends an eligibility field (1/0) to each confirmed target in one linear
+# pass. Newly stale sessions are absent because only confirmed rows are emitted.
+mark_revalidated_targets() {
+  local revalidated_targets="$1" confirmed_targets="$2" marker
+  marker='__tmux_agents_confirmed_rows__'
+  {
+    printf '%s\n' "$revalidated_targets"
+    printf '%s\n' "$marker"
+    printf '%s\n' "$confirmed_targets"
+  } | awk -F '\t' -v marker="$marker" '
+    $0 == marker { reading_confirmed = 1; next }
+    !reading_confirmed {
+      if ($1 != "") {
+        eligible[$1] = 1
+      }
+      next
+    }
+    reading_confirmed && $1 != "" {
+      print $0 "\t" (($1 in eligible) ? 1 : 0)
+    }
+  '
 }
 
 # kill_unattached_session <session>
@@ -473,7 +513,7 @@ stale_targets_include_session() {
 # kill, narrowing the client-side check/kill race. Returns 0 when killed, 2 when
 # the session became attached, and 1 when tmux could not evaluate or kill it.
 kill_unattached_session() {
-  local session="$1" exact_session pane_target target_q marker result event_q
+  local session="$1" exact_session pane_target target_q marker result
   exact_session="=$session"
   # if-shell -t accepts a pane target, so the trailing colon is required for
   # tmux's exact-session syntax. Without it, '=name' has no format context and
@@ -490,9 +530,23 @@ kill_unattached_session() {
   if [ "$result" = "$marker" ]; then
     return 2
   fi
-  event_q="$(printf '%q' "$DIR/event.sh")"
-  tmux run-shell -b "$event_q exited-session $(printf '%q' "$session")" 2>/dev/null || true
   return 0
+}
+
+# schedule_session_exit_reports <newline-separated-sessions>
+# Starts one background worker for the whole cleanup. The worker reports
+# sessions sequentially and fails fast if the daemon becomes unavailable, so a
+# large cleanup never creates one concurrent reporting process per session and
+# the picker never waits for daemon timeout/retry paths after successful kills.
+schedule_session_exit_reports() {
+  local sessions="$1" command session
+  [ -n "$sessions" ] || return 0
+  command="$(printf '%q' "$DIR/event.sh") exited-sessions"
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    command+=" $(printf '%q' "$session")"
+  done <<< "$sessions"
+  tmux run-shell -b "$command" 2>/dev/null || true
 }
 
 # kill_stale_sessions
@@ -502,8 +556,8 @@ kill_unattached_session() {
 # owns the terminal. Non-destructive outcomes report through tmux's status line
 # because fzf redraws over terminal output as soon as this returns.
 kill_stale_sessions() {
-  local configured max_age now targets revalidated_targets
-  local killed failed skipped session state_at ago reply kill_status
+  local configured max_age now targets revalidated_targets validated_targets
+  local killed failed skipped killed_sessions session state_at eligible ago reply kill_status
   configured="$(get_tmux_option @agent_stale_kill_age "$STALE_KILL_AGE_DEFAULT")"
   if ! max_age="$(parse_duration_seconds "$configured")"; then
     tmux display-message "tmux-agents-session-manager: invalid @agent_stale_kill_age '$configured' (use 900, 90s, 45m, 12h or 7d)"
@@ -549,23 +603,35 @@ kill_stale_sessions() {
   # A session can still disappear after revalidation, and tmux can refuse the
   # operation. Count only what actually died so a partial failure is never
   # reported as a clean sweep.
+  if ! validated_targets="$(mark_revalidated_targets "$revalidated_targets" "$targets")"; then
+    tmux display-message 'tmux-agents-session-manager: revalidated cleanup targets could not be matched; no sessions were killed'
+    return 1
+  fi
   killed=0
   failed=0
   skipped=0
-  while IFS=$'\t' read -r session state_at; do
+  killed_sessions=''
+  while IFS=$'\t' read -r session state_at eligible; do
     [ -n "$session" ] || continue
-    if ! stale_targets_include_session "$revalidated_targets" "$session"; then
+    if [ "$eligible" != 1 ]; then
       skipped=$((skipped + 1))
       continue
     fi
     kill_unattached_session "$session"
     kill_status=$?
     case "$kill_status" in
-    0) killed=$((killed + 1)) ;;
+    0)
+      killed=$((killed + 1))
+      if [ -n "$killed_sessions" ]; then
+        killed_sessions+=$'\n'
+      fi
+      killed_sessions+="$session"
+      ;;
     2) skipped=$((skipped + 1)) ;;
     *) failed=$((failed + 1)) ;;
     esac
-  done <<< "$targets"
+  done <<< "$validated_targets"
+  schedule_session_exit_reports "$killed_sessions"
   if [ "$failed" -gt 0 ]; then
     if [ "$skipped" -gt 0 ]; then
       tmux display-message "tmux-agents-session-manager: killed $killed agent session(s), $failed could not be killed, $skipped no longer eligible"
@@ -634,6 +700,7 @@ open_target() {
 }
 
 [ "${1:-}" = '--list' ] && {
+  initialize_live_config
   emit_rows
   exit $?
 }
@@ -641,8 +708,10 @@ open_target() {
 [ "${1:-}" = '--list-mode' ] && {
   mode_file="${2:-}"
   if [ -n "$mode_file" ] && [ "$(picker_mode "$mode_file")" = history ]; then
+    initialize_history_binary
     emit_history_rows
   else
+    initialize_live_config
     emit_rows
   fi
   exit $?
@@ -665,6 +734,7 @@ open_target() {
 }
 
 [ "${1:-}" = '--kill-stale' ] && {
+  initialize_session_config
   kill_stale_sessions
   exit $?
 }
@@ -676,6 +746,8 @@ if ! command -v fzf >/dev/null 2>&1; then
   exit 0
 fi
 
+initialize_live_config
+initialize_history_binary
 self="${BASH_SOURCE[0]}"
 self_cmd="$(printf '%q' "$self")"
 mode_file="$(mktemp "${TMPDIR:-/tmp}/agent-picker-mode.XXXXXX")" || exit 0

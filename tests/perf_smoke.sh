@@ -9,8 +9,12 @@
 #   PERF_ITERATIONS      measured runs per case (default 7)
 #   PERF_WARMUP          discarded warm-up runs per case (default 2)
 #   PERF_MAX_PICKER_MS   absolute median threshold for picker.sh (0 disables)
-#   PERF_MAX_GROWTH      max allowed median growth when n doubles 50->100
-#                        (default 3.5; linear ~2x, quadratic ~4x; 0 disables)
+#   PERF_MAX_CLEANUP_MS  absolute median threshold for stale cleanup discovery
+#   PERF_MAX_GROWTH      max allowed picker growth when n doubles 50->100
+#   PERF_MAX_CLEANUP_GROWTH
+#                        max cleanup growth when n doubles 100->200
+#                        (defaults: picker 3.5, cleanup 2.5; linear ~2x,
+#                        quadratic ~4x; 0 disables a threshold)
 #
 # Medians (not means) are compared against thresholds so a single slow run on a
 # noisy CI machine does not fail the build. The growth check is machine-speed
@@ -152,6 +156,22 @@ build_case() {
   export DAEMON_SNAPSHOT_ROWS="${daemon_rows%$'\n'}"
 }
 
+build_cleanup_case() {
+  local n="$1" now changed_at sessions='' daemon_rows='' i
+  now="$(date +%s)"
+  changed_at=$((now - 8 * 86400))
+  for i in $(seq 1 "$n"); do
+    sessions+="agent-cleanup-$i"$'\t0\n'
+    daemon_rows+="agent-cleanup-$i"$'\037'"%c$i"$'\037idle\037'"$changed_at"$'\n'
+  done
+  export TMUX_MOCK_OPTIONS='@agent_session_prefix=agent-'
+  export TMUX_MOCK_LIST_SESSIONS="${sessions%$'\n'}"
+  export TMUX_MOCK_LIST_PANES_STATUS=''
+  export TMUX_MOCK_LIST_PANES_PICKER=''
+  export TMUX_MOCK_TARGET_OPTIONS=''
+  export DAEMON_SNAPSHOT_ROWS="${daemon_rows%$'\n'}"
+}
+
 check_threshold() {
   local label="$1" median="$2" max="$3"
   [ "$max" = 0 ] && return 0
@@ -159,10 +179,10 @@ check_threshold() {
     fail "$label median ${median}ms exceeded threshold ${max}ms"
 }
 
-# check_growth <label> <median at n=50> <median at n=100>
-# Machine-independent scaling check: when the input doubles, the median must
-# not grow by more than PERF_MAX_GROWTH. Linear scaling gives <= ~2x (fixed
-# startup cost pulls it below 2); quadratic gives ~4x.
+# check_growth <label> <smaller median> <larger median>
+# Machine-independent scaling check for cases where the input doubles. Linear
+# scaling gives <= ~2x (fixed startup cost pulls it below 2); quadratic gives
+# ~4x.
 check_growth() {
   local label="$1" small="$2" big="$3"
   [ "$max_growth" = 0 ] && return 0
@@ -170,18 +190,22 @@ check_growth() {
     'BEGIN { exit !(s <= 0 || b <= s * g) }' || {
     local ratio
     ratio="$(awk -v s="$small" -v b="$big" 'BEGIN { printf "%.2f", b / s }')"
-    fail "$label grew ${ratio}x from n=50 to n=100 (max ${max_growth}x); possible per-item cost regression"
+    fail "$label grew ${ratio}x when input doubled (max ${max_growth}x); possible per-item cost regression"
   }
 }
 
 iterations="${PERF_ITERATIONS:-7}"
 warmup="${PERF_WARMUP:-2}"
 max_picker_ms="${PERF_MAX_PICKER_MS:-5000}"
+max_cleanup_ms="${PERF_MAX_CLEANUP_MS:-1000}"
 max_growth="${PERF_MAX_GROWTH:-3.5}"
+max_cleanup_growth="${PERF_MAX_CLEANUP_GROWTH:-2.5}"
 
 printf 'Smoke performance test (mock tmux, %s warmup + %s measured runs/case)\n' "$warmup" "$iterations"
-printf 'Thresholds: picker median<=%sms, 50->100 growth<=%sx (0 disables)\n\n' \
-  "$max_picker_ms" "$max_growth"
+printf 'Thresholds: picker median<=%sms, cleanup median<=%sms (0 disables)\n' \
+  "$max_picker_ms" "$max_cleanup_ms"
+printf 'Growth: picker 50->100<=%sx, cleanup 100->200<=%sx (0 disables)\n\n' \
+  "$max_growth" "$max_cleanup_growth"
 
 declare -A medians=()
 
@@ -195,6 +219,23 @@ for n in 10 50 100; do
 done
 
 check_growth 'picker.sh --list' "${medians[picker|50]}" "${medians[picker|100]}"
+
+# Discovery and cancellation exercise the expensive part of ctrl-r without
+# spawning one conditional kill per eligible session. The 100->200 growth check
+# catches accidental reintroduction of per-session daemon snapshot rescans.
+for n in 50 100 200; do
+  printf 'case: %s stale managed sessions (preview then cancel)\n' "$n"
+  build_cleanup_case "$n"
+  measure "cleanup n=$n" 'scripts/picker.sh --kill-stale < /dev/null'
+  medians["cleanup|$n"]="$PERF_MEDIAN_MS"
+  check_threshold "cleanup n=$n" "$PERF_MEDIAN_MS" "$max_cleanup_ms"
+  printf '\n'
+done
+
+saved_max_growth="$max_growth"
+max_growth="$max_cleanup_growth"
+check_growth 'stale cleanup discovery' "${medians[cleanup|100]}" "${medians[cleanup|200]}"
+max_growth="$saved_max_growth"
 
 if [ "$FAILURES" -gt 0 ]; then
   printf 'not ok - performance smoke test: %s check(s) failed\n' "$FAILURES" >&2

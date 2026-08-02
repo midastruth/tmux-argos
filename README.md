@@ -133,6 +133,9 @@ skipped, and newly stale sessions wait for a future confirmation.
 
 The summary reports only the sessions that were actually killed, plus any that
 became ineligible; if tmux refuses a kill, the count of failures is reported too.
+Lifecycle exit notifications for successfully killed sessions are handed to one
+background worker, so daemon timeout/retry paths do not delay the picker or
+create one concurrent reporting worker per session.
 
 For eligible `idle`/`done` sessions, the age it compares against is the last
 reported state change, not terminal activity. Killed agents lose their in-memory
@@ -446,20 +449,20 @@ cargo test --manifest-path daemon/Cargo.toml
 bash tests/run.sh
 ```
 
-Run the picker discovery smoke performance check with:
+Run the picker and stale-cleanup discovery smoke performance checks with:
 
 ```sh
 bash tests/perf_smoke.sh
 ```
 
 The performance smoke test simulates 10/50/100 managed sessions plus manual
-agent panes using a local fake `tmux` binary. Daemon state-loop behavior is
-covered by Rust tests and the status line itself forks zero processes. Tune or
-disable thresholds with:
+agent panes, and 50/100/200 stale-cleanup candidates, using a local fake `tmux`
+binary. Daemon state-loop behavior is covered by Rust tests and the status line
+itself forks zero processes. Tune or disable thresholds with:
 
 ```sh
-PERF_ITERATIONS=10 PERF_MAX_PICKER_MS=5000 bash tests/perf_smoke.sh
-PERF_MAX_PICKER_MS=0 bash tests/perf_smoke.sh
+PERF_ITERATIONS=10 PERF_MAX_PICKER_MS=5000 PERF_MAX_CLEANUP_MS=1000 bash tests/perf_smoke.sh
+PERF_MAX_PICKER_MS=0 PERF_MAX_CLEANUP_MS=0 bash tests/perf_smoke.sh
 ```
 
 The tests use a local fake `tmux` binary, so they do not require a running tmux

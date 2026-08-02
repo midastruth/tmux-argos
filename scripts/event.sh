@@ -12,6 +12,11 @@ json_string() {
   printf '"%s"' "$value"
 }
 
+send_request() {
+  local request="$1"
+  "$DIR/daemon.sh" send "$request" >/dev/null
+}
+
 kind="${1:-}"
 case "$kind" in
 seen-pane)
@@ -26,6 +31,16 @@ exited-session)
   [ -n "${2:-}" ] || exit 1
   request="{\"type\":\"Exited\",\"pane_id\":null,\"session_name\":$(json_string "$2")}"
   ;;
+exited-sessions)
+  shift
+  [ "$#" -gt 0 ] || exit 1
+  for session in "$@"; do
+    [ -n "$session" ] || exit 1
+    request="{\"type\":\"Exited\",\"pane_id\":null,\"session_name\":$(json_string "$session")}"
+    send_request "$request" || exit 1
+  done
+  exit 0
+  ;;
 *) exit 1 ;;
 esac
-"$DIR/daemon.sh" send "$request" >/dev/null
+send_request "$request"

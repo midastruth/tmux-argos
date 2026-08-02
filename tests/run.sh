@@ -91,8 +91,9 @@ reset_mocks() {
     TMUX_MOCK_HAS_SESSION TMUX_MOCK_EXISTING_SESSIONS TMUX_MOCK_CURRENT_SESSION \
     TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE TMUX_MOCK_SERVER_PID \
     TMUX_MOCK_FAIL_TARGETS \
-    TMUX_MOCK_FAIL_REFRESH_CLIENT TMUX_MOCK_IF_SHELL_RESULT TMUX_MOCK_SHOW_HOOKS \
-    TMUX_MOCK_PS_CHILDREN TMUX_MOCK_PS_COMM \
+    TMUX_MOCK_FAIL_REFRESH_CLIENT TMUX_MOCK_FAIL_RUN_SHELL \
+    TMUX_MOCK_IF_SHELL_RESULT TMUX_MOCK_SHOW_HOOKS \
+    TMUX_MOCK_AWK_FAIL_CALL TMUX_MOCK_PS_CHILDREN TMUX_MOCK_PS_COMM \
     AGENT_SESSION_PREFIX AGENT_DETECT_COMMANDS AGENT_DETECT_WRAPPERS TMUX_PANE \
     PICKER_NOW
 }
@@ -555,6 +556,13 @@ run_bash 'scripts/event.sh exited-pane %8' >/dev/null
 assert_contains 'event client sends pane Exited' "$(<"$DAEMON_LOG")" '"type":"Exited"'
 
 reset_mocks
+run_bash 'scripts/event.sh exited-sessions agent-one agent-two' >/dev/null
+log_contents="$(<"$DAEMON_LOG")"
+assert_contains 'event client batch reports the first exited session' "$log_contents" '"session_name":"agent-one"'
+assert_contains 'event client batch reports the second exited session' "$log_contents" '"session_name":"agent-two"'
+assert_eq 'event client batch sends one request per session sequentially' '2' "$(grep -c '^send ' "$DAEMON_LOG")"
+
+reset_mocks
 run_bash 'scripts/picker.sh --kill pane %8' >/dev/null
 assert_contains 'picker interrupt sends Ctrl-C to manual pane' "$(<"$TMUX_LOG")" $'send-keys\t-t\t%8\tC-c'
 assert_not_contains 'picker interrupt does not report a still-running pane as exited' "$(<"$DAEMON_LOG")" '"type":"Exited"'
@@ -581,8 +589,30 @@ log_contents="$(<"$TMUX_LOG")"
 assert_contains 'picker stale cleanup kills an unattached session idle past the default 7d' "$log_contents" $'kill-session\t-t\tagent-old'
 assert_not_contains 'picker stale cleanup keeps a session idle below the threshold' "$log_contents" $'kill-session\t-t\tagent-fresh'
 assert_contains 'picker stale cleanup reports the killed session in the confirmation prompt' "$out" 'agent-old'
-assert_contains 'picker stale cleanup schedules an exit report for each killed session' "$log_contents" 'event.sh exited-session agent-old'
+assert_contains 'picker stale cleanup schedules an exit report for each killed session' "$log_contents" 'event.sh exited-sessions agent-old'
+assert_contains 'picker stale cleanup uses one background lifecycle worker' "$log_contents" $'run-shell\t-b\t'
+assert_eq 'picker stale cleanup schedules one lifecycle batch' '1' "$(grep -c $'^run-shell\t-b\t.*event.sh exited-sessions' "$TMUX_LOG")"
+assert_not_contains 'picker stale cleanup does not wait for lifecycle reporting inside the kill command' "$log_contents" 'kill-session -t =agent-old ; run-shell'
 assert_contains 'picker stale cleanup uses a server-side attachment check before killing' "$log_contents" $'if-shell\t-F\t-t\t=agent-old:\t#{==:#{session_attached},0}'
+assert_not_contains 'picker stale cleanup does not load history configuration' "$log_contents" '@agent_history_binary'
+assert_not_contains 'picker stale cleanup does not load agent detection configuration' "$log_contents" '@agent_detect_commands'
+assert_not_contains 'picker stale cleanup does not load wrapper detection configuration' "$log_contents" '@agent_detect_wrappers'
+
+# Lifecycle reporting is best-effort after the irreversible kill. If tmux cannot
+# schedule the one background worker, cleanup must not wait, retry without a
+# bound, or claim that the successful kill itself failed.
+reset_mocks
+PICKER_NOW="$stale_now"
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_LIST_SESSIONS=$'agent-report-unavailable\t0'
+DAEMON_SNAPSHOT_ROWS="agent-report-unavailable"$'\037''%1'$'\037''idle'$'\037'"$((stale_now - 8 * 86400))"$'\n'
+TMUX_MOCK_FAIL_RUN_SHELL=1
+run_bash 'scripts/picker.sh --kill-stale' <<< 'y' >/dev/null
+rc="$?"
+log_contents="$(<"$TMUX_LOG")"
+assert_eq 'picker stale cleanup does not fail after a killed session when lifecycle scheduling is unavailable' '0' "$rc"
+assert_contains 'picker stale cleanup still reports the successful kill when lifecycle scheduling is unavailable' "$log_contents" 'killed 1 agent session(s) idle for 7d'
+assert_contains 'picker stale cleanup attempts lifecycle scheduling only once when unavailable' "$log_contents" $'run-shell\t-b\t'
 
 # Old timestamps alone are insufficient: only an explicit idle/done state is
 # eligible, so a long-running or input-blocked agent is never bulk-killed.
@@ -661,6 +691,42 @@ log_contents="$(<"$TMUX_LOG")"
 assert_not_contains 'picker stale cleanup does not ask for confirmation of a fresh session' "$out" 'agent-newly-stale'
 assert_contains 'picker stale cleanup kills a confirmed session that remains stale' "$log_contents" $'kill-session\t-t\tagent-confirmed'
 assert_not_contains 'picker stale cleanup never kills a newly stale unconfirmed session' "$log_contents" $'kill-session\t-t\tagent-newly-stale'
+
+# Failure to build the post-confirmation intersection is a safety-boundary
+# failure: no target may be killed and the command must not report "killed 0" as
+# success. The third awk call is mark_revalidated_targets (the first two build
+# the pre-confirmation and post-confirmation stale snapshots).
+reset_mocks
+PICKER_NOW="$stale_now"
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_LIST_SESSIONS=$'agent-join-failure\t0'
+DAEMON_SNAPSHOT_ROWS="agent-join-failure"$'\037''%1'$'\037''idle'$'\037'"$((stale_now - 8 * 86400))"$'\n'
+SYSTEM_AWK="$(command -v awk)"
+TMUX_MOCK_AWK_FAIL_CALL=3
+cat >"$MOCK_BIN/awk" <<'AWK_MOCK'
+#!/usr/bin/env bash
+count_file="${TMUX_MOCK_STATE_DIR:?}/awk-count"
+count=0
+if [ -r "$count_file" ]; then
+  read -r count <"$count_file"
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$count_file"
+if [ "$count" -eq "${TMUX_MOCK_AWK_FAIL_CALL:-0}" ]; then
+  exit 1
+fi
+exec "${SYSTEM_AWK:?}" "$@"
+AWK_MOCK
+chmod +x "$MOCK_BIN/awk"
+run_bash 'scripts/picker.sh --kill-stale' <<< 'y' >/dev/null
+rc="$?"
+rm -f "$MOCK_BIN/awk"
+unset SYSTEM_AWK TMUX_MOCK_AWK_FAIL_CALL
+log_contents="$(<"$TMUX_LOG")"
+assert_eq 'picker stale cleanup fails when the revalidation join cannot be produced' '1' "$rc"
+assert_not_contains 'picker stale cleanup kills nothing when the revalidation join fails' "$log_contents" 'kill-session'
+assert_contains 'picker stale cleanup reports the failed revalidation join' "$log_contents" 'revalidated cleanup targets could not be matched'
+assert_not_contains 'picker stale cleanup never reports a successful zero kill after join failure' "$log_contents" 'killed 0 agent session(s)'
 
 # Refusing the prompt must leave every session running.
 reset_mocks
@@ -815,7 +881,8 @@ log_contents="$(<"$TMUX_LOG")"
 assert_eq 'picker stale cleanup fails when a session could not be killed' '1' "$rc"
 assert_contains 'picker stale cleanup counts only sessions it actually killed' "$log_contents" 'killed 1 agent session(s), 1 could not be killed'
 assert_contains 'picker stale cleanup still kills the remaining stale sessions' "$log_contents" $'kill-session\t-t\tagent-old'
-assert_not_contains 'picker stale cleanup reports no exit event for a session it failed to kill' "$log_contents" 'event.sh exited-session agent-gone'
+exit_report_log="$(grep $'^run-shell\t-b\t' "$TMUX_LOG" || true)"
+assert_not_contains 'picker stale cleanup runs no exit event for a session it failed to kill' "$exit_report_log" 'agent-gone'
 
 # A leading-zero threshold must not leak bash's octal arithmetic error.
 reset_mocks

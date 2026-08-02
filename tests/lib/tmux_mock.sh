@@ -29,6 +29,7 @@
 #                              including kill-session
 #   TMUX_MOCK_FAIL_REFRESH_CLIENT
 #                              non-empty makes refresh-client fail
+#   TMUX_MOCK_FAIL_RUN_SHELL   non-empty makes run-shell fail
 #   TMUX_MOCK_SHOW_HOOKS       hook names returned by show-hooks -g
 #   TMUX_MOCK_IF_SHELL_RESULT  retained for generic if-shell tests
 #
@@ -337,7 +338,7 @@ case "$cmd" in
   run-shell)
     # Background commands are logged but not executed; individual tests invoke
     # daemon/event clients directly when their output matters.
-    exit 0
+    [ -z "${TMUX_MOCK_FAIL_RUN_SHELL:-}" ]
     ;;
   *)
     exit 0
