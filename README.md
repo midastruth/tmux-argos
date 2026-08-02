@@ -18,7 +18,7 @@ or swap agents via `@agent_agents`.
 - 🟡 **Live status** per session: `blocked` / `working` / `done` / `idle` (Pi
   events plus Herdr-style Codex/Claude screen detection).
 - 👁️ **Live preview** of each session's screen in the picker.
-- 📚 **Unified history**: press `Tab` in the picker to search saved Pi, Codex,
+- 📜 **Unified history**: press `Tab` in the picker to search saved Pi, Codex,
   and Claude conversations, preview recent messages, and resume one in a managed popup.
 - 🎯 **Smart jump** back to the window where the session was launched.
 - 🚀 **Launcher** (`prefix` + `y`) to open or attach an agent session for the

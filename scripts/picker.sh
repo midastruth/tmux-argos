@@ -320,7 +320,7 @@ emit_history_rows() {
       short_path "$cwd"
       name="${cwd##*/}"
       [ -n "$name" ] || name='/'
-      printf '4\thistory\t%s\t📚 history\t%s\t%s\t%s\t%s\t%s\t\t%s\t%s\n' \
+      printf '4\thistory\t%s\t📜 history\t%s\t%s\t%s\t%s\t%s\t\t%s\t%s\n' \
         "$source" "$name" "$ago" "$disp_path" "$title" "$agent" "$cwd" "$resume"
     done | format_rows
 }
