@@ -379,11 +379,12 @@ report_session_exits() {
 # kill_matched_sessions <fzf-matched-rows-file>
 # Kills every managed session in fzf's current match set, including the whole
 # live list when the query is empty. Manual panes and history rows are ignored.
-# A fresh daemon snapshot protects sessions shown as working/blocked when the
-# key was pressed; the state embedded in the matched row also protects sessions
-# that were already shown in either state before the snapshot was requested.
+# A fresh post-confirmation daemon snapshot protects sessions that are then
+# working/blocked; the state embedded in the matched row also protects sessions
+# that were already shown in either state before confirmation.
 kill_matched_sessions() {
-  local matched_file="$1" matched_session_rows daemon_records validated_targets marker
+  local matched_file="$1" matched_session_rows matched_session_count confirmation_reply
+  local daemon_records validated_targets marker
   local killed failed skipped lifecycle_report_failed killed_sessions session protected kill_target
 
   if [ -z "$matched_file" ] || [ ! -r "$matched_file" ]; then
@@ -420,6 +421,23 @@ kill_matched_sessions() {
     return 0
   fi
 
+  matched_session_count="$(printf '%s\n' "$matched_session_rows" | awk -F '\t' '!seen[$3]++ { count++ } END { print count + 0 }')"
+  printf 'Kill eligible managed sessions among %s currently matched session(s)?\n' "$matched_session_count"
+  printf '%s\n' 'Sessions that are working or blocked will be skipped. This cannot be undone.'
+  printf 'Type y to kill, anything else to cancel: '
+  if ! IFS= read -r confirmation_reply; then
+    confirmation_reply=''
+  fi
+  case "$confirmation_reply" in
+  y|Y) ;;
+  *)
+    tmux display-message 'tmux-agents-session-manager: bulk kill cancelled'
+    return 0
+    ;;
+  esac
+
+  # Read live state after confirmation so time spent at the prompt cannot make
+  # the destructive decision depend on a pre-confirmation daemon snapshot.
   if ! daemon_records="$("$DIR/daemon.sh" snapshot-picker 2>/dev/null)"; then
     tmux display-message 'tmux-agents-session-manager: daemon state unavailable; bulk kill aborted'
     return 1
@@ -622,11 +640,11 @@ trap 'rm -f "$mode_file"' EXIT
 printf 'live' >"$mode_file"
 mode_file_q="$(printf '%q' "$mode_file")"
 export FZF_DEFAULT_OPTS=''
-header='Agent sessions · Tab: live/history · enter: open/resume · ctrl-x: kill live target · ctrl-r: kill all matched sessions except working/blocked'
+header='Agent sessions · Tab: live/history · enter: open/resume · ctrl-x: kill live target · ctrl-r: confirm bulk kill except working/blocked'
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=13 \
   --reverse --cycle --header="$header" \
   --preview="$self_cmd --preview {2} {3} {9}" --preview-window='right,62%,wrap' \
-  --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3})+reload($self_cmd --list-mode $mode_file_q),ctrl-r:execute-silent($self_cmd --kill-matched {*f})+reload($self_cmd --list-mode $mode_file_q)")
+  --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3})+reload($self_cmd --list-mode $mode_file_q),ctrl-r:execute($self_cmd --kill-matched {*f})+reload($self_cmd --list-mode $mode_file_q)")
 
 [ -z "$sel" ] && exit 0
 kind="$(printf '%s' "$sel" | cut -f2)"

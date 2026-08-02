@@ -101,7 +101,7 @@ Inside the picker:
 | `Tab`                     | Toggle between running sessions/panes and saved conversation history       |
 | `enter`                   | Open a live target, or resume the selected historical conversation         |
 | `ctrl-x`                  | Kill a managed session, or send `Ctrl-C` to a manual agent pane            |
-| `ctrl-r`                  | Kill all currently matched managed sessions except sessions that are `working` or `blocked` |
+| `ctrl-r`                  | Confirm, then kill all currently matched managed sessions except sessions that are `working` or `blocked` |
 | `↑` / `↓`, type to filter | fzf navigation                                                             |
 
 `ctrl-r` operates on the rows currently matched by fzf. Type part of a project,
@@ -110,20 +110,25 @@ kill every matched managed session in one action. With an empty query, every
 managed session in the live list is considered, which provides a fast “clear
 all” operation.
 
-Sessions displayed as `working` or `blocked` are protected. Immediately before
-the bulk kill, the picker also reads a fresh daemon snapshot; any current
-`working` or `blocked` record protects the entire session even if another record
-for that session is idle. If daemon state is unavailable or malformed, or any
-matched picker row does not have the complete expected schema, the bulk kill
-aborts without killing anything. `idle`, `done`, and `unknown` matched sessions
-are eligible.
+Before deleting anything, `ctrl-r` temporarily leaves the fzf interface and
+asks for confirmation. Type `y` or `Y` to continue; any other input cancels the
+operation. The prompt reports how many distinct managed sessions are currently
+matched. The current fzf query remains the selection boundary.
+
+Sessions displayed as `working` or `blocked` are protected. After confirmation,
+the picker reads a fresh daemon snapshot so time spent at the prompt does not
+make the decision depend on stale pre-confirmation state. Any current `working`
+or `blocked` record protects the entire session even if another record for that
+session is idle. If daemon state is unavailable or malformed, or any matched
+picker row does not have the complete expected schema, the bulk kill aborts
+without killing anything. `idle`, `done`, and `unknown` matched sessions are
+eligible.
 
 Manual Agent panes and history rows are ignored because they are not managed
-live sessions. There is no additional confirmation prompt: the current fzf
-query is the selection boundary. Successful kills are reported to the daemon
-synchronously before the picker becomes interactive again, preventing a newly
-launched numbered session from reusing a name before its predecessor's exit is
-recorded. The picker then reloads the current mode.
+live sessions. Successful kills are reported to the daemon synchronously before
+the picker becomes interactive again, preventing a newly launched numbered
+session from reusing a name before its predecessor's exit is recorded. The
+picker then reloads the current mode.
 
 History mode reads the native local stores for Pi (`~/.pi/agent/sessions`),
 Codex (`~/.codex/sessions`), and Claude (`~/.claude/projects`). Its preview

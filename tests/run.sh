@@ -567,13 +567,27 @@ assert_not_contains 'picker managed-session kill does not defer a reusable-name 
 # rows when the query is empty.
 reset_mocks
 matched_file="$TMP_ROOT/matched-rows"
+run_confirmed_bulk_kill() {
+  run_bash "printf 'y\\n' | scripts/picker.sh --kill-matched '$matched_file'"
+}
+
+printf '%s\n' \
+  $'2\tsession\tagent-cancelled\t🟢 idle   \tcancelled\t1m\t/tmp/cancelled\twaiting\tpi\tidle\t\t\tcancelled display' \
+  >"$matched_file"
+confirmation_output="$(run_bash "printf 'n\\n' | scripts/picker.sh --kill-matched '$matched_file'")"
+assert_contains 'picker bulk kill asks for confirmation with the distinct matched-session count' "$confirmation_output" 'Kill eligible managed sessions among 1 currently matched session(s)?'
+assert_not_contains 'picker bulk kill cancellation kills no sessions' "$(<"$TMUX_LOG")" 'kill-session'
+assert_contains 'picker bulk kill reports cancellation' "$(<"$TMUX_LOG")" 'bulk kill cancelled'
+assert_eq 'picker bulk kill cancellation does not request daemon state' '' "$(<"$DAEMON_LOG")"
+
+reset_mocks
 printf '%s\n' \
   $'2\tsession\tagent-one\t🟢 idle   \tone\t1m\t/tmp/one\twaiting\tpi\tidle\t\t\tone display' \
   $'1\tsession\tagent-two\t🔵 done   \ttwo\t2m\t/tmp/two\tfinished\tpi\tdone\t\t\ttwo display' \
   $'2\tpane\t%9\t🟣 manual \tmanual\t-\t/tmp/manual\tpane running pi\tpi\t\t\t\tmanual display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'picker bulk kill clears the first managed session in an empty-query match set' "$log_contents" $'kill-session\t-t\t=agent-one'
 assert_contains 'picker bulk kill clears the second managed session in an empty-query match set' "$log_contents" $'kill-session\t-t\t=agent-two'
@@ -603,7 +617,7 @@ printf '%s\n' \
   $'2\tsession\tagent-matched\t🟢 idle   \tmatched\t1m\t/tmp/matched\twaiting\tpi\tidle\t\t\tmatched display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'picker bulk kill kills a session in the filtered match set' "$log_contents" $'kill-session\t-t\t=agent-matched'
 assert_not_contains 'picker bulk kill does not discover sessions outside the fzf match set' "$log_contents" 'list-sessions'
@@ -618,7 +632,7 @@ printf '%s\n' \
   $'2\tsession\tagent-safe\t⚪ unknown\tsafe\t-\t/tmp/safe\tunknown\tpi\t\t\t\tsafe display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=$'agent-visible-working\037%1\037idle\037100\nagent-current-blocked\037%2\037idle\037100\nagent-current-blocked\037%3\037blocked\037200'
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_not_contains 'picker bulk kill keeps a session displayed as working' "$log_contents" $'kill-session\t-t\t=agent-visible-working'
 assert_not_contains 'picker bulk kill keeps a session with a current blocked daemon record' "$log_contents" $'kill-session\t-t\t=agent-current-blocked'
@@ -633,7 +647,7 @@ printf '%s\n' \
   $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/b\twaiting\tpi\tidle\t\t\tduplicate b display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 assert_eq 'picker bulk kill de-duplicates matched session rows' '1' "$(grep -c $'^kill-session\t-t\t=agent-duplicate$' "$TMUX_LOG")"
 
 # Manual/history-only matches are a successful no-op and do not require daemon
@@ -644,7 +658,7 @@ printf '%s\n' \
   $'4\thistory\t/tmp/session.jsonl\t📜 history\tproject\t1d\t/tmp/project\ttitle\tpi\t\t/tmp/project\tresume-id\thistory display' \
   >"$matched_file"
 AGENT_DAEMON_BINARY="$TMP_ROOT/missing-daemon"
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
 assert_eq 'picker bulk kill treats manual and history matches as a no-op' '0' "$rc"
@@ -658,7 +672,7 @@ printf '%s\n' \
   $'2\tsession\tagent-valid\t🟢 idle   \tvalid\t1m\t/tmp/valid\twaiting\tpi\tidle\t\t\tvalid display' \
   $'2\tsession\tagent-truncated' \
   >"$matched_file"
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails on a truncated matched row' '1' "$rc"
 assert_not_contains 'picker bulk kill kills nothing when one matched row is truncated' "$(<"$TMUX_LOG")" 'kill-session'
@@ -666,14 +680,14 @@ assert_contains 'picker bulk kill reports malformed matched rows' "$(<"$TMUX_LOG
 
 reset_mocks
 printf '%s\n' $'2\tsession\tagent-tab-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\ttab\twaiting\tpi\tworking\t\t\ttab-shifted display' >"$matched_file"
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails when a tab shifts matched row fields' '1' "$rc"
 assert_not_contains 'picker bulk kill cannot bypass protected state through a tab-shifted path' "$(<"$TMUX_LOG")" 'kill-session'
 
 reset_mocks
 printf '%s\n' $'2\tsession\tagent-newline-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\nnewline\twaiting\tpi\tworking\t\t\tnewline-shifted display' >"$matched_file"
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails when a newline splits a matched row' '1' "$rc"
 assert_not_contains 'picker bulk kill cannot bypass protected state through a newline-split path' "$(<"$TMUX_LOG")" 'kill-session'
@@ -683,7 +697,7 @@ assert_not_contains 'picker bulk kill cannot bypass protected state through a ne
 reset_mocks
 printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t\t\tsafe display' >"$matched_file"
 AGENT_DAEMON_BINARY="$TMP_ROOT/missing-daemon"
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
 assert_eq 'picker bulk kill fails when current daemon state is unavailable' '1' "$rc"
@@ -692,7 +706,7 @@ assert_not_contains 'picker bulk kill kills nothing when daemon state is unavail
 reset_mocks
 printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t\t\tsafe display' >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=$'agent-safe\037%1\037working\037not-a-timestamp'
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails on malformed daemon state' '1' "$rc"
 assert_not_contains 'picker bulk kill kills nothing on malformed daemon state' "$(<"$TMUX_LOG")" 'kill-session'
@@ -707,7 +721,7 @@ printf '%s\n' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 TMUX_MOCK_FAIL_TARGETS='=agent-fail'
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 log_contents="$(<"$TMUX_LOG")"
 assert_eq 'picker bulk kill fails when a matched session could not be killed' '1' "$rc"
@@ -723,7 +737,7 @@ reset_mocks
 printf '%s\n' $'2\tsession\tagent-report-unavailable\t🟢 idle   \treport\t1m\t/tmp/report\twaiting\tpi\tidle\t\t\treport display' >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 DAEMON_MOCK_FAIL_SEND=1
-run_bash "scripts/picker.sh --kill-matched '$matched_file'" >/dev/null
+run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails when synchronous lifecycle reporting fails after a kill' '1' "$rc"
 assert_contains 'picker bulk kill reports completed kill and lifecycle failure' "$(<"$TMUX_LOG")" 'killed 1 matched session(s), skipped 0 working/blocked; daemon exit report failed'
@@ -731,10 +745,11 @@ assert_contains 'picker bulk kill reports completed kill and lifecycle failure' 
 reset_mocks
 run_bash 'scripts/picker.sh test-client' >/dev/null
 fzf_arguments="$(<"$FZF_LOG")"
-assert_contains 'picker binds ctrl-r to kill all current fzf matches' "$fzf_arguments" 'ctrl-r:execute-silent('
+assert_contains 'picker binds ctrl-r to an interactive confirmation action' "$fzf_arguments" 'ctrl-r:execute('
+assert_not_contains 'picker bulk confirmation is not hidden by execute-silent' "$fzf_arguments" 'ctrl-r:execute-silent('
 assert_contains 'picker bulk binding passes all matched rows through an fzf temporary file' "$fzf_arguments" '--kill-matched {*f}'
 assert_contains 'picker ctrl-r binding reloads rows after bulk kill' "$fzf_arguments" '+reload('
-assert_contains 'picker header explains the working and blocked protection' "$fzf_arguments" 'kill all matched sessions except working/blocked'
+assert_contains 'picker header explains confirmation and protected states' "$fzf_arguments" 'confirm bulk kill except working/blocked'
 
 # A missing daemon snapshot must retain the tmux recovery mirror in the picker.
 reset_mocks
