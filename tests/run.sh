@@ -252,8 +252,8 @@ TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 # the rendered age (0s) flaky.
 picker_now="$(date +%s)"
 PICKER_NOW="$picker_now"
-TMUX_MOCK_LIST_SESSIONS="agent-pi	blocked	${picker_now}	${picker_home}/proj	pi	pi	1
-other	done	${picker_now}	/tmp/x		bash	"
+TMUX_MOCK_LIST_SESSIONS="agent-pi	\$1	blocked	${picker_now}	${picker_home}/proj	pi	pi	1
+other	\$2	done	${picker_now}	/tmp/x		bash	"
 out="$(run_bash 'scripts/picker.sh --list')"
 assert_contains 'picker --list emits managed session row identity' "$out" $'session\tagent-pi\t🔴 blocked\tproj\t0s'
 assert_contains 'picker --list shortens home path and shows numbered tool' "$out" $'~/proj\tneeds input\tpi-1'
@@ -264,10 +264,10 @@ reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 now_ts="$(date +%s)"
 PICKER_NOW="$now_ts"
-TMUX_MOCK_LIST_SESSIONS="agent-a	blocked	$((now_ts - 45))	/tmp/a	pi	pi
-agent-b	blocked	$((now_ts - 720))	/tmp/b	pi	pi
-agent-c	blocked	$((now_ts - 10800))	/tmp/c	pi	pi
-agent-d	blocked	$((now_ts - 172800))	/tmp/d	pi	pi"
+TMUX_MOCK_LIST_SESSIONS="agent-a	\$1	blocked	$((now_ts - 45))	/tmp/a	pi	pi
+agent-b	\$2	blocked	$((now_ts - 720))	/tmp/b	pi	pi
+agent-c	\$3	blocked	$((now_ts - 10800))	/tmp/c	pi	pi
+agent-d	\$4	blocked	$((now_ts - 172800))	/tmp/d	pi	pi"
 out="$(run_bash 'scripts/picker.sh --list')"
 assert_contains 'picker --list age shows seconds' "$out" $'session\tagent-a\t🔴 blocked\ta\t45s'
 assert_contains 'picker --list age shows minutes' "$out" $'session\tagent-b\t🔴 blocked\tb\t12m'
@@ -275,6 +275,8 @@ assert_contains 'picker --list age shows hours' "$out" $'session\tagent-c\t🔴 
 assert_contains 'picker --list age shows days' "$out" $'session\tagent-d\t🔴 blocked\td\t2d'
 assert_eq 'picker live rows retain raw state for bulk protection' 'blocked' \
   "$(printf '%s\n' "$out" | cut -f10 | sort -u)"
+assert_eq 'picker managed rows retain immutable tmux session IDs' "$(printf '$%s' 1)" \
+  "$(printf '%s\n' "$out" | awk -F '\t' '$3 == "agent-a" { print $11 }')"
 
 # Rows within the same rank must sort by real age (youngest first), not by the
 # leading number of the humanized age string ("3h" is older than "45s").
@@ -282,8 +284,8 @@ reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 now_ts="$(date +%s)"
 PICKER_NOW="$now_ts"
-TMUX_MOCK_LIST_SESSIONS="agent-old	blocked	$((now_ts - 10800))	/tmp/old	pi	pi
-agent-new	blocked	$((now_ts - 45))	/tmp/new	pi	pi"
+TMUX_MOCK_LIST_SESSIONS="agent-old	\$1	blocked	$((now_ts - 10800))	/tmp/old	pi	pi
+agent-new	\$2	blocked	$((now_ts - 45))	/tmp/new	pi	pi"
 out="$(run_bash 'scripts/picker.sh --list' | cut -f3 | paste -sd, -)"
 assert_eq 'picker --list sorts same-rank rows by real age ascending' \
   'agent-new,agent-old' "$out"
@@ -295,9 +297,9 @@ reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 now_ts="$(date +%s)"
 PICKER_NOW="$now_ts"
-TMUX_MOCK_LIST_SESSIONS="agent-old	blocked	$((now_ts - 10800))	/tmp/old	pi	pi
-agent-noage	blocked		/tmp/noage	pi	pi
-agent-new	blocked	$((now_ts - 45))	/tmp/new	pi	pi"
+TMUX_MOCK_LIST_SESSIONS="agent-old	\$1	blocked	$((now_ts - 10800))	/tmp/old	pi	pi
+agent-noage	\$2	blocked		/tmp/noage	pi	pi
+agent-new	\$3	blocked	$((now_ts - 45))	/tmp/new	pi	pi"
 out="$(run_bash 'scripts/picker.sh --list' | cut -f3 | paste -sd, -)"
 assert_eq 'picker --list sorts unknown age last within its rank' \
   'agent-new,agent-old,agent-noage' "$out"
@@ -558,7 +560,9 @@ assert_contains 'picker interrupt sends Ctrl-C to manual pane' "$(<"$TMUX_LOG")"
 assert_not_contains 'picker interrupt does not report a still-running pane as exited' "$(<"$DAEMON_LOG")" '"type":"Exited"'
 
 reset_mocks
-run_bash 'scripts/picker.sh --kill session agent-pi' >/dev/null
+test_session_id="$(printf '$%s' 9)"
+run_bash "scripts/picker.sh --kill session agent-pi '$test_session_id'" >/dev/null
+assert_contains 'picker managed-session kill targets the immutable session ID' "$(<"$TMUX_LOG")" $'kill-session\t-t\t$9'
 assert_contains 'picker managed-session kill reports exit synchronously' "$(<"$DAEMON_LOG")" '"session_name":"agent-pi"'
 assert_not_contains 'picker managed-session kill does not defer a reusable-name exit report' "$(<"$TMUX_LOG")" 'event.sh exited-session agent-pi'
 
@@ -572,7 +576,7 @@ run_confirmed_bulk_kill() {
 }
 
 printf '%s\n' \
-  $'2\tsession\tagent-cancelled\t🟢 idle   \tcancelled\t1m\t/tmp/cancelled\twaiting\tpi\tidle\t\t\tcancelled display' \
+  $'2\tsession\tagent-cancelled\t🟢 idle   \tcancelled\t1m\t/tmp/cancelled\twaiting\tpi\tidle\t$10\t\tcancelled display' \
   >"$matched_file"
 confirmation_output="$(run_bash "printf 'n\\n' | scripts/picker.sh --kill-matched '$matched_file'")"
 assert_contains 'picker bulk kill asks for confirmation with the distinct matched-session count' "$confirmation_output" 'Kill eligible managed sessions among 1 currently matched session(s)?'
@@ -582,15 +586,16 @@ assert_eq 'picker bulk kill cancellation does not request daemon state' '' "$(<"
 
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-one\t🟢 idle   \tone\t1m\t/tmp/one\twaiting\tpi\tidle\t\t\tone display' \
-  $'1\tsession\tagent-two\t🔵 done   \ttwo\t2m\t/tmp/two\tfinished\tpi\tdone\t\t\ttwo display' \
+  $'2\tsession\tagent-one\t🟢 idle   \tone\t1m\t/tmp/one\twaiting\tpi\tidle\t$11\t\tone display' \
+  $'1\tsession\tagent-two\t🔵 done   \ttwo\t2m\t/tmp/two\tfinished\tpi\tdone\t$12\t\ttwo display' \
   $'2\tpane\t%9\t🟣 manual \tmanual\t-\t/tmp/manual\tpane running pi\tpi\t\t\t\tmanual display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 run_confirmed_bulk_kill >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_contains 'picker bulk kill clears the first managed session in an empty-query match set' "$log_contents" $'kill-session\t-t\t=agent-one'
-assert_contains 'picker bulk kill clears the second managed session in an empty-query match set' "$log_contents" $'kill-session\t-t\t=agent-two'
+assert_contains 'picker bulk kill clears the first managed session by immutable ID' "$log_contents" $'kill-session\t-t\t$11'
+assert_contains 'picker bulk kill clears the second managed session by immutable ID' "$log_contents" $'kill-session\t-t\t$12'
+assert_not_contains 'picker bulk kill never targets a reusable session name' "$log_contents" $'kill-session\t-t\t=agent-one'
 assert_not_contains 'picker bulk kill ignores matched manual panes' "$log_contents" $'send-keys\t-t\t%9'
 daemon_log_contents="$(<"$DAEMON_LOG")"
 assert_contains 'picker bulk kill synchronously reports the first killed session' "$daemon_log_contents" '"session_name":"agent-one"'
@@ -614,41 +619,57 @@ fi
 # filtered result are not considered even if they are otherwise idle.
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-matched\t🟢 idle   \tmatched\t1m\t/tmp/matched\twaiting\tpi\tidle\t\t\tmatched display' \
+  $'2\tsession\tagent-matched\t🟢 idle   \tmatched\t1m\t/tmp/matched\twaiting\tpi\tidle\t$13\t\tmatched display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 run_confirmed_bulk_kill >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_contains 'picker bulk kill kills a session in the filtered match set' "$log_contents" $'kill-session\t-t\t=agent-matched'
+assert_contains 'picker bulk kill kills a session in the filtered match set' "$log_contents" $'kill-session\t-t\t$13'
 assert_not_contains 'picker bulk kill does not discover sessions outside the fzf match set' "$log_contents" 'list-sessions'
+
+# A name can be reused while confirmation is open. If the original immutable
+# ID no longer exists, the exact ID kill fails instead of deleting its same-name
+# replacement.
+reset_mocks
+printf '%s\n' \
+  $'2\tsession\tagent-reused\t🟢 idle   \treused\t1m\t/tmp/reused\twaiting\tpi\tidle\t$30\t\treused display' \
+  >"$matched_file"
+DAEMON_SNAPSHOT_ROWS=''
+TMUX_MOCK_FAIL_TARGETS="$(printf '$%s' 30)"
+run_confirmed_bulk_kill >/dev/null
+rc="$?"
+log_contents="$(<"$TMUX_LOG")"
+assert_eq 'picker bulk kill fails safely when the matched session ID has exited' '1' "$rc"
+assert_contains 'picker bulk kill attempts only the original immutable ID' "$log_contents" $'kill-session\t-t\t$30'
+assert_not_contains 'picker bulk kill never kills a same-name replacement' "$log_contents" $'kill-session\t-t\t=agent-reused'
 
 # Both the status embedded in the displayed row and a fresh daemon snapshot can
 # protect a session. Any working/blocked daemon record protects the whole
 # session when it owns several agent records.
 reset_mocks
 printf '%s\n' \
-  $'3\tsession\tagent-visible-working\t🟡 working\tvisible\t1m\t/tmp/visible\trunning\tpi\tworking\t\t\tvisible display' \
-  $'2\tsession\tagent-current-blocked\t🟢 idle   \tcurrent\t1m\t/tmp/current\twaiting\tpi\tidle\t\t\tcurrent display' \
-  $'2\tsession\tagent-safe\t⚪ unknown\tsafe\t-\t/tmp/safe\tunknown\tpi\t\t\t\tsafe display' \
+  $'3\tsession\tagent-visible-working\t🟡 working\tvisible\t1m\t/tmp/visible\trunning\tpi\tworking\t$14\t\tvisible display' \
+  $'2\tsession\tagent-current-blocked\t🟢 idle   \tcurrent\t1m\t/tmp/current\twaiting\tpi\tidle\t$15\t\tcurrent display' \
+  $'2\tsession\tagent-safe\t⚪ unknown\tsafe\t-\t/tmp/safe\tunknown\tpi\t\t$16\t\tsafe display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=$'agent-visible-working\037%1\037idle\037100\nagent-current-blocked\037%2\037idle\037100\nagent-current-blocked\037%3\037blocked\037200'
 run_confirmed_bulk_kill >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_not_contains 'picker bulk kill keeps a session displayed as working' "$log_contents" $'kill-session\t-t\t=agent-visible-working'
 assert_not_contains 'picker bulk kill keeps a session with a current blocked daemon record' "$log_contents" $'kill-session\t-t\t=agent-current-blocked'
-assert_contains 'picker bulk kill allows a matched session with unknown state' "$log_contents" $'kill-session\t-t\t=agent-safe'
+assert_contains 'picker bulk kill allows a matched session with unknown state' "$log_contents" $'kill-session\t-t\t$16'
 assert_contains 'picker bulk kill reports protected working and blocked sessions' "$log_contents" 'killed 1 matched session(s), skipped 2 working/blocked'
 
 # Duplicate fzf rows must never produce duplicate kill attempts or lifecycle
 # events for the same session.
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/a\twaiting\tpi\tidle\t\t\tduplicate a display' \
-  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/b\twaiting\tpi\tidle\t\t\tduplicate b display' \
+  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/a\twaiting\tpi\tidle\t$17\t\tduplicate a display' \
+  $'2\tsession\tagent-duplicate\t🟢 idle   \tduplicate\t1m\t/tmp/b\twaiting\tpi\tidle\t$17\t\tduplicate b display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 run_confirmed_bulk_kill >/dev/null
-assert_eq 'picker bulk kill de-duplicates matched session rows' '1' "$(grep -c $'^kill-session\t-t\t=agent-duplicate$' "$TMUX_LOG")"
+assert_eq 'picker bulk kill de-duplicates matched session rows by immutable ID' '1' "$(grep -c $'^kill-session\t-t\t\$17$' "$TMUX_LOG")"
 
 # Manual/history-only matches are a successful no-op and do not require daemon
 # state, because neither row represents a managed live session.
@@ -669,7 +690,7 @@ assert_contains 'picker bulk kill reports when the match set has no managed sess
 # is requested or any valid session in the same match set is killed.
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-valid\t🟢 idle   \tvalid\t1m\t/tmp/valid\twaiting\tpi\tidle\t\t\tvalid display' \
+  $'2\tsession\tagent-valid\t🟢 idle   \tvalid\t1m\t/tmp/valid\twaiting\tpi\tidle\t$18\t\tvalid display' \
   $'2\tsession\tagent-truncated' \
   >"$matched_file"
 run_confirmed_bulk_kill >/dev/null
@@ -679,14 +700,21 @@ assert_not_contains 'picker bulk kill kills nothing when one matched row is trun
 assert_contains 'picker bulk kill reports malformed matched rows' "$(<"$TMUX_LOG")" 'matched picker rows are malformed'
 
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-tab-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\ttab\twaiting\tpi\tworking\t\t\ttab-shifted display' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-missing-id\t🟢 idle   \tmissing\t1m\t/tmp/missing\twaiting\tpi\tidle\t\t\tmissing display' >"$matched_file"
+run_confirmed_bulk_kill >/dev/null
+rc="$?"
+assert_eq 'picker bulk kill rejects a managed row without an immutable session ID' '1' "$rc"
+assert_not_contains 'picker bulk kill does not fall back to a reusable session name' "$(<"$TMUX_LOG")" 'kill-session'
+
+reset_mocks
+printf '%s\n' $'2\tsession\tagent-tab-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\ttab\twaiting\tpi\tworking\t$19\t\ttab-shifted display' >"$matched_file"
 run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails when a tab shifts matched row fields' '1' "$rc"
 assert_not_contains 'picker bulk kill cannot bypass protected state through a tab-shifted path' "$(<"$TMUX_LOG")" 'kill-session'
 
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-newline-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\nnewline\twaiting\tpi\tworking\t\t\tnewline-shifted display' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-newline-shifted\t🟢 idle   \tshifted\t1m\t/tmp/with\nnewline\twaiting\tpi\tworking\t$20\t\tnewline-shifted display' >"$matched_file"
 run_confirmed_bulk_kill >/dev/null
 rc="$?"
 assert_eq 'picker bulk kill fails when a newline splits a matched row' '1' "$rc"
@@ -695,7 +723,7 @@ assert_not_contains 'picker bulk kill cannot bypass protected state through a ne
 # Current state is a destructive-operation boundary: unavailable or malformed
 # daemon output aborts before any matched session is killed.
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t\t\tsafe display' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t$21\t\tsafe display' >"$matched_file"
 AGENT_DAEMON_BINARY="$TMP_ROOT/missing-daemon"
 run_confirmed_bulk_kill >/dev/null
 rc="$?"
@@ -704,7 +732,7 @@ assert_eq 'picker bulk kill fails when current daemon state is unavailable' '1' 
 assert_not_contains 'picker bulk kill kills nothing when daemon state is unavailable' "$(<"$TMUX_LOG")" 'kill-session'
 
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t\t\tsafe display' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t$21\t\tsafe display' >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=$'agent-safe\037%1\037working\037not-a-timestamp'
 run_confirmed_bulk_kill >/dev/null
 rc="$?"
@@ -716,16 +744,16 @@ assert_contains 'picker bulk kill reports malformed daemon state' "$(<"$TMUX_LOG
 # included in the synchronous lifecycle batch.
 reset_mocks
 printf '%s\n' \
-  $'2\tsession\tagent-fail\t🟢 idle   \tfail\t1m\t/tmp/fail\twaiting\tpi\tidle\t\t\tfail display' \
-  $'2\tsession\tagent-ok\t🟢 idle   \tok\t1m\t/tmp/ok\twaiting\tpi\tidle\t\t\tok display' \
+  $'2\tsession\tagent-fail\t🟢 idle   \tfail\t1m\t/tmp/fail\twaiting\tpi\tidle\t$22\t\tfail display' \
+  $'2\tsession\tagent-ok\t🟢 idle   \tok\t1m\t/tmp/ok\twaiting\tpi\tidle\t$23\t\tok display' \
   >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
-TMUX_MOCK_FAIL_TARGETS='=agent-fail'
+TMUX_MOCK_FAIL_TARGETS="$(printf '$%s' 22)"
 run_confirmed_bulk_kill >/dev/null
 rc="$?"
 log_contents="$(<"$TMUX_LOG")"
 assert_eq 'picker bulk kill fails when a matched session could not be killed' '1' "$rc"
-assert_contains 'picker bulk kill continues after one tmux kill failure' "$log_contents" $'kill-session\t-t\t=agent-ok'
+assert_contains 'picker bulk kill continues after one tmux kill failure' "$log_contents" $'kill-session\t-t\t$23'
 assert_contains 'picker bulk kill reports the partial failure' "$log_contents" 'killed 1 matched session(s), skipped 0 working/blocked, 1 could not be killed'
 exit_report_log="$(<"$DAEMON_LOG")"
 assert_contains 'picker bulk kill reports successful sessions to the daemon' "$exit_report_log" 'agent-ok'
@@ -734,7 +762,7 @@ assert_not_contains 'picker bulk kill does not report a failed kill as exited' "
 # A lifecycle failure occurs after irreversible tmux operations, so the command
 # returns an explicit boundary error and reports that the kill still completed.
 reset_mocks
-printf '%s\n' $'2\tsession\tagent-report-unavailable\t🟢 idle   \treport\t1m\t/tmp/report\twaiting\tpi\tidle\t\t\treport display' >"$matched_file"
+printf '%s\n' $'2\tsession\tagent-report-unavailable\t🟢 idle   \treport\t1m\t/tmp/report\twaiting\tpi\tidle\t$24\t\treport display' >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=''
 DAEMON_MOCK_FAIL_SEND=1
 run_confirmed_bulk_kill >/dev/null
@@ -748,6 +776,7 @@ fzf_arguments="$(<"$FZF_LOG")"
 assert_contains 'picker binds ctrl-r to an interactive confirmation action' "$fzf_arguments" 'ctrl-r:execute('
 assert_not_contains 'picker bulk confirmation is not hidden by execute-silent' "$fzf_arguments" 'ctrl-r:execute-silent('
 assert_contains 'picker bulk binding passes all matched rows through an fzf temporary file' "$fzf_arguments" '--kill-matched {*f}'
+assert_contains 'picker single-session kill passes the immutable session ID' "$fzf_arguments" '--kill {2} {3} {11}'
 assert_contains 'picker ctrl-r binding reloads rows after bulk kill' "$fzf_arguments" '+reload('
 assert_contains 'picker header explains confirmation and protected states' "$fzf_arguments" 'confirm bulk kill except working/blocked'
 
@@ -756,7 +785,7 @@ reset_mocks
 AGENT_DAEMON_BINARY="$TMP_ROOT/missing-daemon"
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 PICKER_NOW=100
-TMUX_MOCK_LIST_SESSIONS=$'agent-pi\tdone\t100\t/tmp/project\tpi\tpi\t1'
+TMUX_MOCK_LIST_SESSIONS=$'agent-pi\t$1\tdone\t100\t/tmp/project\tpi\tpi\t1'
 out="$(run_bash 'scripts/picker.sh --list')"
 assert_contains 'picker falls back to managed tmux mirror when daemon is unavailable' "$out" $'session\tagent-pi\t🔵 done'
 AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
@@ -764,7 +793,7 @@ AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
 reset_mocks
 PICKER_NOW=100
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
-TMUX_MOCK_LIST_SESSIONS=$'agent-pi\tdone\t90\t/tmp/project\tpi\tpi\t1'
+TMUX_MOCK_LIST_SESSIONS=$'agent-pi\t$1\tdone\t90\t/tmp/project\tpi\tpi\t1'
 DAEMON_SNAPSHOT_ROWS=$'agent-pi\037%1\037working\037100\n'
 out="$(run_bash 'scripts/picker.sh --list')"
 assert_contains 'picker prefers authoritative daemon snapshot over recovery mirror' "$out" $'session\tagent-pi\t🟡 working'

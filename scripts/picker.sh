@@ -164,10 +164,10 @@ pane_still_exists() {
 }
 
 emit_managed_rows() {
-  local now s state at path cmd tool instance name rank label desc ago disp_path daemon_state daemon_at
+  local now s session_id state at path cmd tool instance name rank label desc ago disp_path daemon_state daemon_at
   now=$(picker_now)
-  tmux list-sessions -F '#{session_name}	#{@agent_state}	#{@agent_state_at}	#{pane_current_path}	#{@agent_tool}	#{pane_current_command}	#{@agent_instance}' 2>/dev/null |
-    while IFS=$'\t' read -r s state at path tool cmd instance; do
+  tmux list-sessions -F '#{session_name}	#{session_id}	#{@agent_state}	#{@agent_state_at}	#{pane_current_path}	#{@agent_tool}	#{pane_current_command}	#{@agent_instance}' 2>/dev/null |
+    while IFS=$'\t' read -r s session_id state at path tool cmd instance; do
       is_managed_session "$s" || continue
       name=${path##*/}
       if lookup_daemon_state session "$s"; then
@@ -180,10 +180,11 @@ emit_managed_rows() {
       classify "$state"
       humanize_ago "$at" "$now"
       short_path "$path"
-      # Fields 1-9 are display metadata; field 10 keeps the raw state so a
-      # bulk action can protect matches already shown as working or blocked.
-      printf '%s\tsession\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$rank" "$s" "$label" "$name" "$ago" "$disp_path" "$desc" "$tool" "$state"
+      # Fields 1-9 are display metadata, field 10 keeps the raw state, and
+      # field 11 identifies this tmux session instance even if its name is
+      # deleted and reused while a destructive action awaits confirmation.
+      printf '%s\tsession\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$rank" "$s" "$label" "$name" "$ago" "$disp_path" "$desc" "$tool" "$state" "$session_id"
     done
 }
 
@@ -276,8 +277,8 @@ format_rows() {
     sort -t$'\t' -k2,2n -k1,1n | cut -f2- |
     # Append a pre-aligned display column (field 13). Two passes first find the
     # widest project/tool names, then pad every row. Fields 1-9 are common row
-    # metadata, field 10 holds live raw state, and fields 11/12 hold the
-    # cwd/resume reference for history rows.
+    # metadata and field 10 holds live raw state. Field 11 holds either a live
+    # session ID or a history cwd; field 12 holds the history resume reference.
     awk 'BEGIN { FS = OFS = "\t" }
       {
         rows[NR] = $0
@@ -338,18 +339,23 @@ emit_history_rows() {
 }
 
 kill_target() {
-  local kind="$1" target="$2"
+  local kind="$1" target="$2" session_id="${3:-}"
   case "$kind" in
   session)
-    if ! tmux kill-session -t "$target" 2>/dev/null; then
+    # A session name can be reused as soon as its predecessor exits. Target the
+    # immutable ID captured in the picker row so a replacement cannot be killed.
+    if ! [[ "$session_id" =~ ^\$[0-9]+$ ]]; then
       return 1
     fi
-    # Complete the name-based exit report before fzf becomes interactive
-    # again, so a newly launched numbered session cannot reuse the name first.
+    if ! tmux kill-session -t "$session_id" 2>/dev/null; then
+      return 1
+    fi
+    # Complete the name-based exit report before this picker becomes
+    # interactive again, keeping its next launch behind the lifecycle update.
     if ! "$DIR/event.sh" exited-session "$target" >/dev/null 2>&1; then
       # The tmux kill is irreversible, so this boundary can only report the
       # lifecycle failure rather than roll back or retry without a bound.
-      tmux display-message 'tmux-agents-session-manager: session killed, but daemon exit report failed'
+      tmux display-message 'tmux-argos: session killed, but daemon exit report failed'
       return 1
     fi
     ;;
@@ -362,8 +368,8 @@ kill_target() {
 }
 
 # report_session_exits <newline-separated-sessions>
-# Reports a completed bulk kill synchronously and sequentially. Session names
-# are reusable, so this must finish before fzf returns interactive control.
+# Reports a completed bulk kill synchronously and sequentially before this fzf
+# instance returns interactive control.
 report_session_exits() {
   local sessions="$1" session
   local -a event_arguments=()
@@ -385,10 +391,10 @@ report_session_exits() {
 kill_matched_sessions() {
   local matched_file="$1" matched_session_rows matched_session_count confirmation_reply
   local daemon_records validated_targets marker
-  local killed failed skipped lifecycle_report_failed killed_sessions session protected kill_target
+  local killed failed skipped lifecycle_report_failed killed_sessions session session_id protected
 
   if [ -z "$matched_file" ] || [ ! -r "$matched_file" ]; then
-    tmux display-message 'tmux-agents-session-manager: matched picker rows could not be read; bulk kill aborted'
+    tmux display-message 'tmux-argos: matched picker rows could not be read; bulk kill aborted'
     return 1
   fi
 
@@ -401,7 +407,7 @@ kill_matched_sessions() {
       next
     }
     $2 == "session" {
-      if ($10 !~ /^(idle|done|working|blocked)?$/ || $11 != "" || $12 != "") {
+      if ($10 !~ /^(idle|done|working|blocked)?$/ || $11 !~ /^\$[0-9]+$/ || $12 != "") {
         invalid_row = 1
         next
       }
@@ -413,15 +419,15 @@ kill_matched_sessions() {
       }
     }
   ' "$matched_file")"; then
-    tmux display-message 'tmux-agents-session-manager: matched picker rows are malformed; bulk kill aborted'
+    tmux display-message 'tmux-argos: matched picker rows are malformed; bulk kill aborted'
     return 1
   fi
   if [ -z "$matched_session_rows" ]; then
-    tmux display-message 'tmux-agents-session-manager: no managed agent sessions in the current match set'
+    tmux display-message 'tmux-argos: no managed agent sessions in the current match set'
     return 0
   fi
 
-  matched_session_count="$(printf '%s\n' "$matched_session_rows" | awk -F '\t' '!seen[$3]++ { count++ } END { print count + 0 }')"
+  matched_session_count="$(printf '%s\n' "$matched_session_rows" | awk -F '\t' '!seen[$11]++ { count++ } END { print count + 0 }')"
   printf 'Kill eligible managed sessions among %s currently matched session(s)?\n' "$matched_session_count"
   printf '%s\n' 'Sessions that are working or blocked will be skipped. This cannot be undone.'
   printf 'Type y to kill, anything else to cancel: '
@@ -431,7 +437,7 @@ kill_matched_sessions() {
   case "$confirmation_reply" in
   y|Y) ;;
   *)
-    tmux display-message 'tmux-agents-session-manager: bulk kill cancelled'
+    tmux display-message 'tmux-argos: bulk kill cancelled'
     return 0
     ;;
   esac
@@ -439,14 +445,14 @@ kill_matched_sessions() {
   # Read live state after confirmation so time spent at the prompt cannot make
   # the destructive decision depend on a pre-confirmation daemon snapshot.
   if ! daemon_records="$("$DIR/daemon.sh" snapshot-picker 2>/dev/null)"; then
-    tmux display-message 'tmux-agents-session-manager: daemon state unavailable; bulk kill aborted'
+    tmux display-message 'tmux-argos: daemon state unavailable; bulk kill aborted'
     return 1
   fi
 
   # Preserve fzf order and de-duplicate session rows while joining the match set
   # with the current daemon snapshot. Any working/blocked record protects the
   # whole session. Malformed daemon output aborts this destructive operation.
-  marker='__tmux_agents_daemon_rows__'
+  marker='__tmux_argos_daemon_rows__'
   if ! validated_targets="$({
     printf '%s\n' "$matched_session_rows"
     printf '%s\n' "$marker"
@@ -456,12 +462,14 @@ kill_matched_sessions() {
     !reading_daemon {
       split($0, picker, "\t")
       session = picker[3]
-      if (!(session in matched)) {
-        matched[session] = 1
-        ordered[++count] = session
+      session_id = picker[11]
+      if (!(session_id in matched)) {
+        matched[session_id] = 1
+        ordered[++count] = session_id
+        names[session_id] = session
       }
       if (picker[10] == "working" || picker[10] == "blocked") {
-        protected[session] = 1
+        protected[session_id] = 1
       }
       next
     }
@@ -476,7 +484,7 @@ kill_matched_sessions() {
       }
       session = daemon[1]
       if (session != "" && (daemon[3] == "working" || daemon[3] == "blocked")) {
-        protected[session] = 1
+        protected_names[session] = 1
       }
     }
     END {
@@ -484,12 +492,14 @@ kill_matched_sessions() {
         exit 1
       }
       for (order_index = 1; order_index <= count; order_index++) {
-        session = ordered[order_index]
-        print session "\t" ((session in protected) ? 1 : 0)
+        session_id = ordered[order_index]
+        session = names[session_id]
+        is_protected = ((session_id in protected) || (session in protected_names)) ? 1 : 0
+        print session "\t" session_id "\t" is_protected
       }
     }
   ')"; then
-    tmux display-message 'tmux-agents-session-manager: daemon state could not be validated; bulk kill aborted'
+    tmux display-message 'tmux-argos: daemon state could not be validated; bulk kill aborted'
     return 1
   fi
 
@@ -497,14 +507,13 @@ kill_matched_sessions() {
   failed=0
   skipped=0
   killed_sessions=''
-  while IFS=$'\t' read -r session protected; do
+  while IFS=$'\t' read -r session session_id protected; do
     [ -n "$session" ] || continue
     if [ "$protected" = 1 ]; then
       skipped=$((skipped + 1))
       continue
     fi
-    kill_target="=$session"
-    if tmux kill-session -t "$kill_target" 2>/dev/null; then
+    if tmux kill-session -t "$session_id" 2>/dev/null; then
       killed=$((killed + 1))
       if [ -n "$killed_sessions" ]; then
         killed_sessions+=$'\n'
@@ -517,20 +526,20 @@ kill_matched_sessions() {
 
   # Reporting failure cannot undo successful tmux kills. Return an explicit
   # boundary error, but do not return control until the bounded report attempt
-  # completes; this closes the numbered-session name reuse race.
+  # completes.
   lifecycle_report_failed=0
   if ! report_session_exits "$killed_sessions"; then
     lifecycle_report_failed=1
   fi
   if [ "$failed" -gt 0 ]; then
-    tmux display-message "tmux-agents-session-manager: killed $killed matched session(s), skipped $skipped working/blocked, $failed could not be killed"
+    tmux display-message "tmux-argos: killed $killed matched session(s), skipped $skipped working/blocked, $failed could not be killed"
     return 1
   fi
   if [ "$lifecycle_report_failed" -eq 1 ]; then
-    tmux display-message "tmux-agents-session-manager: killed $killed matched session(s), skipped $skipped working/blocked; daemon exit report failed"
+    tmux display-message "tmux-argos: killed $killed matched session(s), skipped $skipped working/blocked; daemon exit report failed"
     return 1
   fi
-  tmux display-message "tmux-agents-session-manager: killed $killed matched session(s), skipped $skipped working/blocked"
+  tmux display-message "tmux-argos: killed $killed matched session(s), skipped $skipped working/blocked"
   return 0
 }
 
@@ -615,7 +624,7 @@ open_target() {
 }
 
 [ "${1:-}" = '--kill' ] && {
-  kill_target "${2:-}" "${3:-}"
+  kill_target "${2:-}" "${3:-}" "${4:-}"
   exit $?
 }
 
@@ -644,7 +653,7 @@ header='Agent sessions · Tab: live/history · enter: open/resume · ctrl-x: kil
 sel=$(emit_rows | fzf --ansi --delimiter='\t' --with-nth=13 \
   --reverse --cycle --header="$header" \
   --preview="$self_cmd --preview {2} {3} {9}" --preview-window='right,62%,wrap' \
-  --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3})+reload($self_cmd --list-mode $mode_file_q),ctrl-r:execute($self_cmd --kill-matched {*f})+reload($self_cmd --list-mode $mode_file_q)")
+  --bind="tab:execute-silent($self_cmd --toggle-mode $mode_file_q)+reload($self_cmd --list-mode $mode_file_q),ctrl-x:execute-silent($self_cmd --kill {2} {3} {11})+reload($self_cmd --list-mode $mode_file_q),ctrl-r:execute($self_cmd --kill-matched {*f})+reload($self_cmd --list-mode $mode_file_q)")
 
 [ -z "$sel" ] && exit 0
 kind="$(printf '%s' "$sel" | cut -f2)"

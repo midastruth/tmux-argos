@@ -36,7 +36,7 @@ or swap agents via `@agent_agents`.
 ## Prerequisites
 
 - **tmux ≥ 3.3** for borderless `display-popup` (`-B`)
-- **fzf** for the picker UI
+- **fzf ≥ 0.63** for the picker UI and bulk-match `{*f}` actions
 - **Pi** CLI (`pi` command) for the default Pi agent (other agents can be configured instead)
 - bash and a Rust toolchain; macOS or Linux
 
@@ -124,11 +124,14 @@ picker row does not have the complete expected schema, the bulk kill aborts
 without killing anything. `idle`, `done`, and `unknown` matched sessions are
 eligible.
 
+Each matched managed row also carries tmux's immutable `session_id`. Deletion
+targets that ID rather than the reusable display name. If the original session
+exits while confirmation is open and another client creates a new session with
+the same name, the old ID no longer resolves and the replacement is not killed.
+
 Manual Agent panes and history rows are ignored because they are not managed
 live sessions. Successful kills are reported to the daemon synchronously before
-the picker becomes interactive again, preventing a newly launched numbered
-session from reusing a name before its predecessor's exit is recorded. The
-picker then reloads the current mode.
+the picker becomes interactive again. The picker then reloads the current mode.
 
 History mode reads the native local stores for Pi (`~/.pi/agent/sessions`),
 Codex (`~/.codex/sessions`), and Claude (`~/.claude/projects`). Its preview

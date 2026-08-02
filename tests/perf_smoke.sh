@@ -117,7 +117,7 @@ measure() {
 
 build_case() {
   local n="$1" now sessions='' panes_status='' panes_picker='' opts='' daemon_rows=''
-  local i state tool cmd path pane manual_state
+  local i state tool cmd path session_id pane manual_state
   now="$(date +%s)"
   for i in $(seq 1 "$n"); do
     case $((i % 4)) in
@@ -132,7 +132,8 @@ build_case() {
       *) tool='codex'; cmd='codex' ;;
     esac
     path="/tmp/project-$i"
-    sessions+="agent-$tool-$i	$state	$now	$path	$tool	$cmd"$'\n'
+    session_id="\$$i"
+    sessions+="agent-$tool-$i	$session_id	$state	$now	$path	$tool	$cmd"$'\n'
     daemon_rows+="agent-$tool-$i"$'\037'"%m$i"$'\037'"$state"$'\037'"$now"$'\n'
 
     pane="%$i"
