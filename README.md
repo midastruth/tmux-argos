@@ -23,8 +23,8 @@ or swap agents via `@agent_agents`.
 - 🎯 **Smart jump** back to the window where the session was launched.
 - 🚀 **Launcher** (`prefix` + `y`) to open or attach an agent session for the
   current directory.
-- ❌ **Quick kill** (`ctrl-x`) from the picker, plus a confirmed bulk cleanup
-  (`ctrl-r`) of unattached agent sessions idle past `@agent_stale_kill_age`.
+- ❌ **Quick kill** (`ctrl-x`) from the picker, plus one-key bulk cleanup
+  (`ctrl-r`) of every matched managed session except `working`/`blocked` ones.
 - 📊 **Status-line summary**: a compact `agents 1● 2✦ 1✓` fragment counting
   blocked / working / done states from the daemon cache without forking from the
   status line. Place it anywhere in your own status line.
@@ -101,45 +101,27 @@ Inside the picker:
 | `Tab`                     | Toggle between running sessions/panes and saved conversation history       |
 | `enter`                   | Open a live target, or resume the selected historical conversation         |
 | `ctrl-x`                  | Kill a managed session, or send `Ctrl-C` to a manual agent pane            |
-| `ctrl-r`                  | Kill every unattached managed session idle for at least `@agent_stale_kill_age`, after confirmation |
+| `ctrl-r`                  | Kill all currently matched managed sessions except sessions that are `working` or `blocked` |
 | `↑` / `↓`, type to filter | fzf navigation                                                             |
 
-`ctrl-r` lists the sessions it would kill, then waits for a typed `y`; anything
-else cancels. It is deliberately narrow, because killing a session is
-irreversible:
+`ctrl-r` operates on the rows currently matched by fzf. Type part of a project,
+tool, path, or session display name to narrow the list, then press `ctrl-r` to
+kill every matched managed session in one action. With an empty query, every
+managed session in the live list is considered, which provides a fast “clear
+all” operation.
 
-- only managed agent sessions are considered — manual rows are panes inside your
-  own sessions, and history rows are saved transcripts rather than live processes;
-- attached sessions are always skipped, since a session you are watching can be
-  alive while reporting no state change for days;
-- only sessions whose daemon records are all explicitly `idle` or `done` are
-  eligible. Any `working`, `blocked`, or unknown record makes the entire session
-  ineligible, including an older record for a long-running agent;
-- only the state daemon's snapshot decides a session's age. A session the daemon
-  does not know about (its age renders as `-`) is skipped, and if the snapshot
-  cannot be read at all the cleanup aborts and says so on the status line. The
-  tmux option `@agent_state_at` is written once when a session is created and is
-  never refreshed for `codex`/`claude` sessions, so falling back to it would
-  report an actively working session as idle since its launch day;
-- when a session has several eligible daemon records (for example a `codex`
-  pane and a `pi` pane in one session), the **newest** timestamp decides its age.
+Sessions displayed as `working` or `blocked` are protected. Immediately before
+the bulk kill, the picker also reads a fresh daemon snapshot; any current
+`working` or `blocked` record protects the entire session even if another record
+for that session is idle. If daemon state is unavailable or malformed, the bulk
+kill aborts without killing anything. `idle`, `done`, and `unknown` matched
+sessions are eligible.
 
-After `y` is entered, the picker reads tmux attachment state and daemon activity
-again. It considers only sessions that were shown in the confirmation list and
-are still stale. Immediately before each kill, a tmux server-side `if-shell -F`
-checks attachment state and performs the kill in the same command queue, further
-narrowing the attachment race. Sessions that became attached or active are
-skipped, and newly stale sessions wait for a future confirmation.
-
-The summary reports only the sessions that were actually killed, plus any that
-became ineligible; if tmux refuses a kill, the count of failures is reported too.
-Lifecycle exit notifications for successfully killed sessions are handed to one
-background worker, so daemon timeout/retry paths do not delay the picker or
-create one concurrent reporting worker per session.
-
-For eligible `idle`/`done` sessions, the age it compares against is the last
-reported state change, not terminal activity. Killed agents lose their in-memory
-context, but their transcripts stay resumable from the history tab (`Tab`).
+Manual Agent panes and history rows are ignored because they are not managed
+live sessions. There is no additional confirmation prompt: the current fzf
+query is the selection boundary. Successful kills are reported to the daemon by
+one background lifecycle worker, and the picker reloads the current mode after
+the operation.
 
 History mode reads the native local stores for Pi (`~/.pi/agent/sessions`),
 Codex (`~/.codex/sessions`), and Claude (`~/.claude/projects`). Its preview
@@ -360,20 +342,11 @@ set -g @agent_detect_wrappers 'node bun npx npm pnpm yarn'
 set -g @agent_session_prefix 'agent-'
 set -g @agent_popup_width    '90%'
 set -g @agent_popup_height   '90%'
-set -g @agent_stale_kill_age '7d'
 set -g @agent_history_pi_dir     '~/.pi/agent/sessions'
 set -g @agent_history_codex_dir  '~/.codex'
 set -g @agent_history_claude_dir '~/.claude'
 set -g @agent_history_binary '/path/to/daemon/target/release/tmux-argos-history'
 ```
-
-`@agent_stale_kill_age` is the idle threshold for the picker's `ctrl-r` bulk
-cleanup. It accepts a bare seconds count or one unit suffix: `900`, `90s`, `45m`,
-`12h`, `7d`. An unparseable value, a non-positive one (including `0`, which would
-mean "kill every unattached managed session"), or a digit run longer than 12
-characters (which can overflow shell arithmetic into a tiny threshold) disables
-the cleanup and reports the error on the tmux status line rather than falling
-back to a threshold you did not ask for.
 
 The history directory options are useful when an agent's local data home is
 customized. The plugin expands a leading `~/`. `@agent_history_binary` defaults
@@ -449,20 +422,20 @@ cargo test --manifest-path daemon/Cargo.toml
 bash tests/run.sh
 ```
 
-Run the picker and stale-cleanup discovery smoke performance checks with:
+Run the picker discovery smoke performance check with:
 
 ```sh
 bash tests/perf_smoke.sh
 ```
 
 The performance smoke test simulates 10/50/100 managed sessions plus manual
-agent panes, and 50/100/200 stale-cleanup candidates, using a local fake `tmux`
-binary. Daemon state-loop behavior is covered by Rust tests and the status line
-itself forks zero processes. Tune or disable thresholds with:
+agent panes using a local fake `tmux` binary. Daemon state-loop behavior is
+covered by Rust tests and the status line itself forks zero processes. Tune or
+disable the threshold with:
 
 ```sh
-PERF_ITERATIONS=10 PERF_MAX_PICKER_MS=5000 PERF_MAX_CLEANUP_MS=1000 bash tests/perf_smoke.sh
-PERF_MAX_PICKER_MS=0 PERF_MAX_CLEANUP_MS=0 bash tests/perf_smoke.sh
+PERF_ITERATIONS=10 PERF_MAX_PICKER_MS=5000 bash tests/perf_smoke.sh
+PERF_MAX_PICKER_MS=0 bash tests/perf_smoke.sh
 ```
 
 The tests use a local fake `tmux` binary, so they do not require a running tmux

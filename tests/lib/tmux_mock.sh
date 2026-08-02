@@ -7,10 +7,7 @@
 #   TMUX_MOCK_OPTIONS          "key=value" lines for global show-option
 #   TMUX_MOCK_TARGET_OPTIONS   "target|key=value" lines for -t show-option(s)
 #   TMUX_MOCK_STATUS_OPTIONS   output for display-message with -F
-#   TMUX_MOCK_LIST_SESSIONS    output for the first list-sessions call
-#   TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST
-#                              output for later calls when set; call state is
-#                              stored under TMUX_MOCK_STATE_DIR
+#   TMUX_MOCK_LIST_SESSIONS    output for list-sessions
 #   TMUX_MOCK_LIST_PANES       output for list-panes (single fixture)
 #   TMUX_MOCK_LIST_PANES_PICKER / TMUX_MOCK_LIST_PANES_STATUS
 #                              alternative per-caller fixtures: when either is
@@ -229,23 +226,11 @@ case "$cmd" in
     run_chain "$cmd" "$@"
     ;;
   list-sessions)
-    list_sessions="${TMUX_MOCK_LIST_SESSIONS:-}"
-    if [ "${TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST+x}" = x ]; then
-      count_file="${TMUX_MOCK_STATE_DIR:?}/list-sessions-count"
-      count=0
-      if [ -r "$count_file" ]; then
-        read -r count <"$count_file"
-      fi
-      if [ "$count" -gt 0 ]; then
-        list_sessions="$TMUX_MOCK_LIST_SESSIONS_AFTER_FIRST"
-      fi
-      printf '%s\n' "$((count + 1))" >"$count_file"
-    fi
-    if [ -n "$list_sessions" ]; then
+    if [ -n "${TMUX_MOCK_LIST_SESSIONS:-}" ]; then
       if [[ " $* " == *$'\037'* ]]; then
-        printf '%s\n' "$list_sessions" | tr '\t' '\037'
+        printf '%s\n' "$TMUX_MOCK_LIST_SESSIONS" | tr '\t' '\037'
       else
-        printf '%s\n' "$list_sessions"
+        printf '%s\n' "$TMUX_MOCK_LIST_SESSIONS"
       fi
     fi
     exit 0
@@ -302,28 +287,13 @@ case "$cmd" in
     [ -z "${TMUX_MOCK_FAIL_REFRESH_CLIENT:-}" ]
     ;;
   if-shell)
-    # The final two arguments are the then/else tmux commands; options such as
-    # -F and -t may add positional arguments before them.
-    if_shell_args=("$@")
-    if_shell_count="${#if_shell_args[@]}"
-    then_command="${if_shell_args[$((if_shell_count - 2))]:-}"
-    else_command="${if_shell_args[$((if_shell_count - 1))]:-}"
     if [ "${TMUX_MOCK_IF_SHELL_RESULT:-committed}" = committed ]; then
-      log '__if-shell-then__' "$then_command"
-      if [[ "$then_command" == kill-session\ -t\ * ]]; then
-        target="${then_command#kill-session -t }"
-        target="${target%% *}"
-        target="${target#=}"
-        log 'kill-session' '-t' "$target"
-        target_should_fail "$target" && exit 1
-      fi
+      log '__if-shell-then__' "${3:-}"
+      printf '%s' committed
     else
-      log '__if-shell-else__' "$else_command"
-      case "$else_command" in
-      'display-message -p '*) printf '%s' "${else_command#display-message -p }" ;;
-      esac
+      log '__if-shell-else__' "${4:-}"
+      printf '%s' stale
     fi
-    exit 0
     ;;
   kill-session)
     # Model a session that vanished or that tmux refuses to kill, so callers can
