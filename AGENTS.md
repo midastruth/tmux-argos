@@ -31,7 +31,7 @@
 
 - `tmux-argos.tmux`：插件入口和 tmux 配置初始化。
 - `scripts/`：启动、选择器、状态管理及共享 Bash 逻辑。
-- `extensions/tmux-state.ts`：Pi 状态上报扩展。
+- `daemon/`：Pi、Codex、Claude 屏幕状态检测、状态缓存及历史读取。
 - `tests/run.sh`：主要 Bash 测试套件。
 - `tests/perf_smoke.sh`：性能冒烟测试。
 

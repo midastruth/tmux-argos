@@ -154,8 +154,8 @@ out="$(run_bash 'AGENT_DETECT_COMMANDS="pi aider"; . scripts/helpers.sh; is_dete
 assert_eq 'is_detected_command uses environment command list' 'yes' "$out"
 
 reset_mocks
-out="$(run_bash '. scripts/helpers.sh; agents_config "pi --ext"')"
-assert_eq 'agents_config defaults include pi/codex/claude' $'pi=pi --ext\ncodex=codex\nclaude=claude' "$out"
+out="$(run_bash '. scripts/helpers.sh; agents_config "pi"')"
+assert_eq 'agents_config defaults include direct pi/codex/claude commands' $'pi=pi\ncodex=codex\nclaude=claude' "$out"
 
 reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_agents=foo=foo --bar\\nbar=bar --baz'
@@ -405,99 +405,6 @@ log_contents="$(<"$TMUX_LOG")"
 assert_contains 'picker --list validates closed pane without quiet target suppression' "$log_contents" $'show-options\t-p\t-t\t%1'
 assert_not_contains 'picker --list no longer uses quiet option query for race detection' "$log_contents" $'show-options\t-pq\t-t\t%1'
 
-# state.sh
-AGENT_TOOL=pi
-export AGENT_TOOL
-reset_mocks
-TMUX_MOCK_OPTIONS=$'@agent_status=on'
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='agent-a'
-export TMUX_MOCK_OPTIONS TMUX_PANE TMUX_MOCK_PANE_SESSION
-run_bash 'scripts/state.sh done' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh writes pane scoped state' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-assert_contains 'state.sh writes session scoped state for managed sessions by immutable ID' "$log_contents" $'set-option\t-t\t$1\t@agent_state\tdone'
-daemon_log_contents="$(<"$DAEMON_LOG")"
-assert_contains 'state.sh reports state to daemon' "$daemon_log_contents" '"type":"Report"'
-assert_contains 'state.sh sends a process generation' "$daemon_log_contents" '"process_generation":'
-assert_contains 'state.sh sends a monotonic sequence' "$daemon_log_contents" '"sequence":1'
-assert_contains 'state.sh sends the immutable session ID' "$daemon_log_contents" "\"session_id\":\"\$1\""
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='work'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION
-run_bash 'scripts/state.sh done' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh still writes pane scoped state for manual panes' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-assert_not_contains 'state.sh does not pollute manual sessions' "$log_contents" $'set-option\t-t\t$1\t@agent_state\tdone'
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='agent-a'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION
-run_bash 'scripts/state.sh nonsense' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_not_contains 'state.sh ignores invalid states' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tnonsense'
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='agent-a'
-TMUX_MOCK_PANE_VISIBLE='1 1 1'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE
-run_bash 'scripts/state.sh done' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh downgrades done to idle on watched managed pane' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tidle'
-assert_not_contains 'state.sh does not record done on watched managed pane' "$log_contents" $'@agent_state\tdone'
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='work'
-TMUX_MOCK_PANE_VISIBLE='1 1 1'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE
-run_bash 'scripts/state.sh done' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh downgrades done to idle on watched manual pane' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tidle'
-assert_not_contains 'state.sh does not record done on watched manual pane' "$log_contents" $'@agent_state\tdone'
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='agent-a'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION
-run_bash 'scripts/state.sh done' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh keeps done on unwatched managed pane' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-assert_contains 'state.sh writes session done on unwatched managed pane by immutable ID' "$log_contents" $'set-option\t-t\t$1\t@agent_state\tdone'
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='agent-a'
-TMUX_MOCK_PANE_VISIBLE='1 0 1'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE
-run_bash 'scripts/state.sh done' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh keeps done when managed window is inactive' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='agent-a'
-TMUX_MOCK_PANE_VISIBLE='1 1 0'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE
-run_bash 'scripts/state.sh done' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh keeps done when managed pane is inactive' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tdone'
-
-reset_mocks
-TMUX_PANE='%1'
-TMUX_MOCK_PANE_SESSION='agent-a'
-TMUX_MOCK_PANE_VISIBLE='1 1 1'
-export TMUX_PANE TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_VISIBLE
-run_bash 'scripts/state.sh working' >/dev/null
-log_contents="$(<"$TMUX_LOG")"
-assert_contains 'state.sh does not downgrade working on watched managed pane' "$log_contents" $'set-option\t-p\t-t\t%1\t@agent_state\tworking'
-assert_not_contains 'state.sh does not turn working into idle when watched' "$log_contents" $'@agent_state\tidle'
-unset AGENT_TOOL
-
 # launch.sh
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'
@@ -505,6 +412,8 @@ TMUX_MOCK_HAS_SESSION='no'
 run_bash 'scripts/launch.sh /tmp/project @9' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'launch.sh creates numbered default session from path hash' "$log_contents" $'new-session\t-d\t-s\tagent-6533d8b9-1\t-c\t/tmp/project'
+assert_contains 'launch.sh starts Pi directly without a state extension' "$log_contents" $'new-session\t-d\t-s\tagent-6533d8b9-1\t-c\t/tmp/project\tpi'
+assert_not_contains 'launch.sh does not inject the removed Pi state extension' "$log_contents" 'tmux-state.ts'
 assert_contains 'launch.sh records instance number' "$log_contents" $'set-option\t-t\tagent-6533d8b9-1\t@agent_instance\t1'
 assert_contains 'launch.sh records origin window' "$log_contents" $'set-option\t-t\tagent-6533d8b9-1\t@agent_origin\t@9'
 assert_contains 'launch.sh opens popup attached to numbered session' "$log_contents" $'display-popup\t-w\t90%\t-h\t90%\t-E\ttmux attach-session -t agent-6533d8b9-1'

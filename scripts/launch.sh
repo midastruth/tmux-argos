@@ -10,7 +10,6 @@
 # @agent_multiple_instances off to restore one session per directory/agent.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
 
@@ -26,7 +25,7 @@ agent="${3:-}"
 resume_ref="${4:-}"
 
 prefix="$(agent_session_prefix)"
-default_cmd="pi -e '$ROOT/extensions/tmux-state.ts'"
+default_cmd='pi'
 w="$(get_tmux_option @agent_popup_width '90%')"
 h="$(get_tmux_option @agent_popup_height '90%')"
 

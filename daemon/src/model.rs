@@ -6,9 +6,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_FRAMES: usize = 64;
 const MAX_FRAME_BYTES: usize = 64;
-const SCREEN_CAPTURE_HISTORY_LINES: &str = "-80";
 const RETIRED_GENERATION_TTL: Duration = Duration::from_secs(300);
 const MAX_RETIRED_GENERATIONS: usize = 4096;
+const PENDING_IDLE_RECHECK: Duration = Duration::from_millis(100);
+const PENDING_IDLE_CAP: Duration = Duration::from_millis(700);
+const PENDING_IDLE_CONFIRMATIONS: u8 = 3;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -24,6 +26,7 @@ pub struct Config {
     pub frames: Vec<String>,
     pub animation_interval: Duration,
     pub screen_interval: Duration,
+    pub screen_full_scan_interval: Duration,
     pub state_ttl: Duration,
     pub detect_commands: HashSet<String>,
     pub wrapper_commands: HashSet<String>,
@@ -83,6 +86,17 @@ impl Config {
         if screen_ms < 250 {
             return Err("screen detection interval must be at least 250ms".into());
         }
+        let full_scan_ms = parse_u64(
+            "@agent_screen_full_scan_interval_ms",
+            30000,
+            "screen full scan interval",
+        )?;
+        if full_scan_ms < screen_ms {
+            return Err(
+                "screen full scan interval must not be shorter than the screen detection interval"
+                    .into(),
+            );
+        }
         let ttl = parse_u64("@agent_state_ttl", 259200, "state TTL")?;
 
         Ok(Self {
@@ -98,6 +112,7 @@ impl Config {
             frames,
             animation_interval: Duration::from_millis(animation_ms),
             screen_interval: Duration::from_millis(screen_ms),
+            screen_full_scan_interval: Duration::from_millis(full_scan_ms),
             state_ttl: Duration::from_secs(ttl),
             detect_commands: word_set(&get("@agent_detect_commands", "pi codex claude")),
             wrapper_commands: word_set(&get(
@@ -122,6 +137,7 @@ impl Config {
             frames: vec!["a".into(), "b".into()],
             animation_interval: Duration::from_secs(1),
             screen_interval: Duration::from_secs(1),
+            screen_full_scan_interval: Duration::from_secs(30),
             state_ttl: Duration::from_secs(60),
             detect_commands: word_set("pi codex claude"),
             wrapper_commands: word_set("node bun npx npm pnpm yarn"),
@@ -152,6 +168,8 @@ enum Source {
 struct PaneRow {
     session_name: String,
     session_id: String,
+    window_id: String,
+    window_activity: u64,
     pane_id: String,
     command: String,
     pane_pid: u32,
@@ -167,6 +185,47 @@ struct PaneRow {
 struct ScreenDetection {
     state: AgentState,
     skip_state_update: bool,
+    visible_idle: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PendingIdleConfirmation {
+    started_at: Option<Instant>,
+    confirmations: u8,
+}
+
+impl PendingIdleConfirmation {
+    fn should_hold(
+        &mut self,
+        previous_state: AgentState,
+        detection: ScreenDetection,
+        now: Instant,
+    ) -> bool {
+        let plain_working_to_idle = previous_state == AgentState::Working
+            && detection.state == AgentState::Idle
+            && !detection.visible_idle;
+        if !plain_working_to_idle {
+            *self = Self::default();
+            return false;
+        }
+
+        let Some(started_at) = self.started_at else {
+            self.started_at = Some(now);
+            self.confirmations = 0;
+            return true;
+        };
+        if now.saturating_duration_since(started_at) >= PENDING_IDLE_CAP {
+            *self = Self::default();
+            return false;
+        }
+
+        self.confirmations = self.confirmations.saturating_add(1);
+        if self.confirmations >= PENDING_IDLE_CONFIRMATIONS {
+            *self = Self::default();
+            return false;
+        }
+        true
+    }
 }
 
 pub struct StateCenter {
@@ -178,6 +237,9 @@ pub struct StateCenter {
     animation_deadline: Option<Instant>,
     expiry_deadline: Option<Instant>,
     screen_deadline: Option<Instant>,
+    full_screen_scan_deadline: Instant,
+    last_window_activity: HashMap<String, u64>,
+    pending_idle_confirmations: HashMap<String, PendingIdleConfirmation>,
     published_summary: Option<String>,
     capture_marker: String,
 }
@@ -197,6 +259,9 @@ impl StateCenter {
             animation_deadline: None,
             expiry_deadline: None,
             screen_deadline: Some(Instant::now()),
+            full_screen_scan_deadline: Instant::now(),
+            last_window_activity: HashMap::new(),
+            pending_idle_confirmations: HashMap::new(),
             published_summary: None,
             capture_marker: format!("--tmux-argos-daemon-split-{nanos:016x}--"),
         }
@@ -227,7 +292,7 @@ impl StateCenter {
         if managed_only != managed || fields[1].is_empty() || fields[3].is_empty() {
             return;
         }
-        if is_screen_owned_tool(fields[3]) {
+        if is_screen_detected_tool(fields[3]) {
             return;
         }
         let Some(state) = parse_state(fields[4]) else {
@@ -266,6 +331,9 @@ impl StateCenter {
         self.frame_index = 0;
         self.animation_deadline = None;
         self.screen_deadline = Some(Instant::now());
+        self.full_screen_scan_deadline = Instant::now();
+        self.last_window_activity.clear();
+        self.pending_idle_confirmations.clear();
     }
 
     pub fn apply(&mut self, request: Request) -> Result<(), String> {
@@ -281,7 +349,7 @@ impl StateCenter {
                 session_id,
                 session_name,
             } => {
-                if is_screen_owned_tool(&tool) {
+                if is_screen_detected_tool(&tool) {
                     return Err(format!("{tool} state is owned by screen detection"));
                 }
                 let key = event_key(&tool, &pane_id, &process_generation);
@@ -408,8 +476,13 @@ impl StateCenter {
         }
         self.expire_states();
         if self.screen_deadline.is_some_and(|deadline| deadline <= now) {
-            self.scan_screen_agents();
-            self.screen_deadline = Some(now + self.config.screen_interval);
+            let pending_idle_recheck = self.scan_screen_agents(now);
+            let next_interval = if pending_idle_recheck {
+                PENDING_IDLE_RECHECK
+            } else {
+                self.config.screen_interval
+            };
+            self.screen_deadline = Some(Instant::now() + next_interval);
         }
     }
 
@@ -428,11 +501,20 @@ impl StateCenter {
         });
     }
 
-    fn scan_screen_agents(&mut self) {
+    fn scan_screen_agents(&mut self, now: Instant) -> bool {
         let Some(rows) = list_pane_rows(&self.server_socket) else {
-            return;
+            return !self.pending_idle_confirmations.is_empty();
         };
-        self.remove_exited_records(&rows, Instant::now());
+        self.remove_exited_records(&rows, now);
+        let full_scan = now >= self.full_screen_scan_deadline;
+        if full_scan {
+            self.full_screen_scan_deadline = now + self.config.screen_full_scan_interval;
+        }
+        let wall_clock_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         let mut process_table: Option<Option<String>> = None;
         let mut resolved = Vec::new();
         for row in rows {
@@ -441,39 +523,76 @@ impl StateCenter {
             }
         }
 
-        let pane_ids: Vec<&str> = resolved
-            .iter()
-            .map(|(row, _)| row.pane_id.as_str())
-            .collect();
-        let mut screens = capture_panes_batch(&self.server_socket, &self.capture_marker, &pane_ids)
-            .unwrap_or_else(|| {
-                pane_ids
-                    .iter()
-                    .filter_map(|pane_id| {
-                        capture_pane(&self.server_socket, pane_id)
-                            .map(|screen| (pane_id.to_string(), screen))
-                    })
-                    .collect()
-            });
-
+        let activity_recency_grace = self.config.screen_interval + Duration::from_secs(1);
         let mut active_keys = HashSet::new();
+        let mut active_windows = HashSet::new();
+        let mut dirty_pane_ids = Vec::new();
+        for (row, tool) in &resolved {
+            let key = screen_key(tool, &row.pane_id);
+            active_keys.insert(key.clone());
+            active_windows.insert(row.window_id.clone());
+            let previous_activity = self.last_window_activity.get(&row.window_id).copied();
+            let should_capture = should_capture_screen(
+                self.agents.contains_key(&key),
+                self.pending_idle_confirmations.contains_key(&key),
+                full_scan,
+                row.window_activity,
+                previous_activity,
+                wall_clock_seconds,
+                activity_recency_grace,
+            );
+            self.last_window_activity
+                .insert(row.window_id.clone(), row.window_activity);
+            if should_capture {
+                dirty_pane_ids.push(row.pane_id.as_str());
+            }
+        }
+        self.last_window_activity
+            .retain(|window_id, _| active_windows.contains(window_id));
+
+        let mut screens =
+            capture_panes_batch(&self.server_socket, &self.capture_marker, &dirty_pane_ids)
+                .unwrap_or_else(|| {
+                    dirty_pane_ids
+                        .iter()
+                        .filter_map(|pane_id| {
+                            capture_pane(&self.server_socket, pane_id)
+                                .map(|screen| (pane_id.to_string(), screen))
+                        })
+                        .collect()
+                });
+
         for (row, tool) in resolved {
             let key = screen_key(&tool, &row.pane_id);
-            active_keys.insert(key.clone());
             let Some(screen) = screens.remove(&row.pane_id) else {
                 continue;
             };
             let detection = match tool.as_str() {
+                "pi" => detect_pi(&screen),
                 "claude" => detect_claude(&row.pane_title, &screen),
                 "codex" => detect_codex(&row.pane_title, &screen),
                 _ => continue,
             };
             if detection.skip_state_update {
+                self.pending_idle_confirmations.remove(&key);
                 continue;
             }
-            let previous = self.agents.get(&key);
-            let state = self.screen_display_state(previous, detection.state, row.visible);
+
+            let previous = self.agents.get(&key).cloned();
+            let hold_working = previous.as_ref().is_some_and(|record| {
+                self.pending_idle_confirmations
+                    .entry(key.clone())
+                    .or_default()
+                    .should_hold(record.state, detection, now)
+            });
+            if hold_working {
+                continue;
+            }
+            self.pending_idle_confirmations.remove(&key);
+
+            let state = self.screen_display_state(previous.as_ref(), detection.state, row.visible);
             let changed_at = previous
+                .as_ref()
                 .filter(|record| record.state == state && record.session_id == row.session_id)
                 .map(|record| record.changed_at)
                 .unwrap_or_else(SystemTime::now);
@@ -495,6 +614,9 @@ impl StateCenter {
 
         self.agents
             .retain(|key, record| record.source != Source::Screen || active_keys.contains(key));
+        self.pending_idle_confirmations
+            .retain(|key, _| active_keys.contains(key));
+        !self.pending_idle_confirmations.is_empty()
     }
 
     fn remove_exited_records(&mut self, rows: &[PaneRow], now: Instant) {
@@ -756,6 +878,24 @@ impl StateCenter {
     }
 }
 
+fn should_capture_screen(
+    has_previous_record: bool,
+    has_pending_idle_confirmation: bool,
+    full_scan: bool,
+    window_activity: u64,
+    previous_window_activity: Option<u64>,
+    wall_clock_seconds: u64,
+    activity_recency_grace: Duration,
+) -> bool {
+    if !has_previous_record || has_pending_idle_confirmation || full_scan {
+        return true;
+    }
+    if window_activity == 0 || previous_window_activity != Some(window_activity) {
+        return true;
+    }
+    wall_clock_seconds.saturating_sub(window_activity) <= activity_recency_grace.as_secs()
+}
+
 fn word_set(value: &str) -> HashSet<String> {
     value
         .split_whitespace()
@@ -804,12 +944,13 @@ fn state_label(state: AgentState) -> &'static str {
     }
 }
 
-fn is_screen_owned_tool(tool: &str) -> bool {
-    matches!(tool, "claude" | "codex")
+fn is_screen_detected_tool(tool: &str) -> bool {
+    matches!(tool, "pi" | "claude" | "codex")
 }
 
 fn canonical_screen_tool(tool: &str) -> Option<String> {
     match tool {
+        "pi" => Some("pi".to_string()),
         "claude" | "claude-code" | "claude.exe" => Some("claude".to_string()),
         "codex" => Some("codex".to_string()),
         _ => None,
@@ -827,7 +968,7 @@ fn tmux_output(server_socket: &str, args: &[&str]) -> Option<String> {
 }
 
 fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
-    let format = "#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}\t#{@agent_tool}\t#{session_attached}\t#{window_active}\t#{pane_active}";
+    let format = "#{session_name}\t#{session_id}\t#{window_id}\t#{window_activity}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}\t#{@agent_tool}\t#{session_attached}\t#{window_active}\t#{pane_active}";
     let output = tmux_output(server_socket, &["list-panes", "-a", "-F", format])?;
     Some(
         output
@@ -836,6 +977,8 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
                 let mut fields = line.split('\t');
                 let session_name = fields.next()?.to_string();
                 let session_id = fields.next()?.to_string();
+                let window_id = fields.next()?.to_string();
+                let window_activity = fields.next()?.parse::<u64>().unwrap_or(0);
                 let pane_id = fields.next()?.to_string();
                 let command = fields.next()?.to_string();
                 let pane_pid = fields.next()?.parse::<u32>().ok()?;
@@ -848,6 +991,8 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
                 Some(PaneRow {
                     session_name,
                     session_id,
+                    window_id,
+                    window_activity,
                     pane_id,
                     command,
                     pane_pid,
@@ -861,18 +1006,9 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
 }
 
 fn capture_pane(server_socket: &str, pane_id: &str) -> Option<String> {
-    tmux_output(
-        server_socket,
-        &[
-            "capture-pane",
-            "-p",
-            "-J",
-            "-t",
-            pane_id,
-            "-S",
-            SCREEN_CAPTURE_HISTORY_LINES,
-        ],
-    )
+    // Detection must inspect the live bottom screen, not scrollback. Otherwise
+    // Pi's old `Working...` line can keep a completed turn marked as working.
+    tmux_output(server_socket, &["capture-pane", "-p", "-J", "-t", pane_id])
 }
 
 /// Captures every listed pane in a single tmux invocation by chaining
@@ -899,8 +1035,6 @@ fn capture_panes_batch(
             "-J".into(),
             "-t".into(),
             (*pane_id).into(),
-            "-S".into(),
-            SCREEN_CAPTURE_HISTORY_LINES.into(),
             ";".into(),
             "display-message".into(),
             "-p".into(),
@@ -977,6 +1111,15 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+fn detect_pi(screen: &str) -> ScreenDetection {
+    // Pi renders this literal status while a turn is running. This is the same
+    // high-confidence screen rule used by Herdr's bundled Pi manifest.
+    if screen.contains("Working...") {
+        return detection(AgentState::Working);
+    }
+    detection(AgentState::Idle)
+}
+
 fn detect_codex(title: &str, screen: &str) -> ScreenDetection {
     let title_lowercase = title.to_ascii_lowercase();
     if title_lowercase.contains("action required") {
@@ -1016,7 +1159,7 @@ fn detect_codex(title: &str, screen: &str) -> ScreenDetection {
         return detection(AgentState::Blocked);
     }
     if !title.trim().is_empty() && !starts_with_braille_spinner(title) {
-        return detection(AgentState::Idle);
+        return visible_idle_detection();
     }
     detection(AgentState::Idle)
 }
@@ -1070,7 +1213,7 @@ fn detect_claude(title: &str, screen: &str) -> ScreenDetection {
             ],
         )
     {
-        return detection(AgentState::Idle);
+        return visible_idle_detection();
     }
     if contains_all(
         &screen_lowercase,
@@ -1108,7 +1251,7 @@ fn detect_claude(title: &str, screen: &str) -> ScreenDetection {
         return detection(AgentState::Blocked);
     }
     if title.trim_start().starts_with('✳') {
-        return detection(AgentState::Idle);
+        return visible_idle_detection();
     }
     detection(AgentState::Idle)
 }
@@ -1117,6 +1260,15 @@ fn detection(state: AgentState) -> ScreenDetection {
     ScreenDetection {
         state,
         skip_state_update: false,
+        visible_idle: false,
+    }
+}
+
+fn visible_idle_detection() -> ScreenDetection {
+    ScreenDetection {
+        state: AgentState::Idle,
+        skip_state_update: false,
+        visible_idle: true,
     }
 }
 
@@ -1124,6 +1276,7 @@ fn skip_detection() -> ScreenDetection {
     ScreenDetection {
         state: AgentState::Idle,
         skip_state_update: true,
+        visible_idle: false,
     }
 }
 
@@ -1289,14 +1442,38 @@ mod tests {
     }
 
     #[test]
-    fn startup_restore_accepts_manual_pi_mirrors() {
+    fn config_defaults_to_a_bounded_periodic_full_scan() {
+        let config = Config::from_values(&HashMap::new()).unwrap();
+        assert_eq!(config.screen_full_scan_interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn config_rejects_a_full_scan_faster_than_regular_detection() {
+        let mut values = HashMap::new();
+        values.insert("@agent_screen_interval_ms".into(), "1000".into());
+        values.insert("@agent_screen_full_scan_interval_ms".into(), "500".into());
+        assert!(Config::from_values(&values).is_err());
+    }
+
+    #[test]
+    fn startup_restore_accepts_event_owned_custom_mirrors() {
         let mut state = center();
-        state.restore_mirror_row("work\t$1\t%2\tpi\tdone\t123\tmanual-generation\t7", false);
+        state.restore_mirror_row(
+            "work\t$1\t%2\tcustom\tdone\t123\tmanual-generation\t7",
+            false,
+        );
         assert_eq!(state.agents.len(), 1);
         let restored = state.agents.values().next().unwrap();
         assert_eq!(restored.pane_id.as_deref(), Some("%2"));
         assert_eq!(restored.state, AgentState::Done);
         assert_eq!(restored.sequence, 7);
+    }
+
+    #[test]
+    fn startup_restore_ignores_screen_detected_pi_mirrors() {
+        let mut state = center();
+        state.restore_mirror_row("work\t$1\t%2\tpi\tdone\t123\tg\t7", false);
+        assert!(state.agents.is_empty());
     }
 
     #[test]
@@ -1338,7 +1515,7 @@ mod tests {
         let mut state = center();
         state
             .apply(Request::Report {
-                tool: "pi".into(),
+                tool: "custom".into(),
                 pane_id: "%1".into(),
                 process_generation: "g".into(),
                 sequence: 2,
@@ -1349,7 +1526,7 @@ mod tests {
             .unwrap();
         state
             .apply(Request::Report {
-                tool: "pi".into(),
+                tool: "custom".into(),
                 pane_id: "%1".into(),
                 process_generation: "g".into(),
                 sequence: 1,
@@ -1365,19 +1542,21 @@ mod tests {
     }
 
     #[test]
-    fn codex_report_is_rejected_because_screen_detection_owns_it() {
-        let mut state = center();
-        let result = state.apply(Request::Report {
-            tool: "codex".into(),
-            pane_id: "%1".into(),
-            process_generation: "g".into(),
-            sequence: 1,
-            state: AgentState::Working,
-            session_id: "$1".into(),
-            session_name: "work".into(),
-        });
-        assert!(result.is_err());
-        assert!(state.agents.is_empty());
+    fn reports_are_rejected_for_screen_detected_tools() {
+        for tool in ["pi", "codex", "claude"] {
+            let mut state = center();
+            let result = state.apply(Request::Report {
+                tool: tool.into(),
+                pane_id: "%1".into(),
+                process_generation: "g".into(),
+                sequence: 1,
+                state: AgentState::Working,
+                session_id: "$1".into(),
+                session_name: "work".into(),
+            });
+            assert!(result.is_err());
+            assert!(state.agents.is_empty());
+        }
     }
 
     #[test]
@@ -1386,7 +1565,7 @@ mod tests {
         for generation in ["a", "b"] {
             state
                 .apply(Request::Report {
-                    tool: "pi".into(),
+                    tool: "custom".into(),
                     pane_id: "%1".into(),
                     process_generation: generation.into(),
                     sequence: 1,
@@ -1398,7 +1577,7 @@ mod tests {
         }
         state
             .apply(Request::Report {
-                tool: "pi".into(),
+                tool: "custom".into(),
                 pane_id: "%1".into(),
                 process_generation: "a".into(),
                 sequence: 2,
@@ -1425,7 +1604,7 @@ mod tests {
         let mut state = center();
         state
             .apply(Request::Report {
-                tool: "pi".into(),
+                tool: "custom".into(),
                 pane_id: "%1".into(),
                 process_generation: "g".into(),
                 sequence: 1,
@@ -1451,7 +1630,7 @@ mod tests {
         for (pane, generation, session_id) in [("%1", "old", "$1"), ("%2", "new", "$2")] {
             state
                 .apply(Request::Report {
-                    tool: "pi".into(),
+                    tool: "custom".into(),
                     pane_id: pane.into(),
                     process_generation: generation.into(),
                     sequence: 1,
@@ -1470,7 +1649,7 @@ mod tests {
             .unwrap();
         state
             .apply(Request::Report {
-                tool: "pi".into(),
+                tool: "custom".into(),
                 pane_id: "%2".into(),
                 process_generation: "new".into(),
                 sequence: 2,
@@ -1492,7 +1671,7 @@ mod tests {
         for (pane, generation, session_id) in [("%1", "old", "$1"), ("%2", "new", "$2")] {
             state
                 .apply(Request::Report {
-                    tool: "pi".into(),
+                    tool: "custom".into(),
                     pane_id: pane.into(),
                     process_generation: generation.into(),
                     sequence: 1,
@@ -1505,6 +1684,8 @@ mod tests {
         let replacement = PaneRow {
             session_name: "agent-reused".into(),
             session_id: "$2".into(),
+            window_id: "@2".into(),
+            window_activity: 1,
             pane_id: "%2".into(),
             command: "pi".into(),
             pane_pid: 2,
@@ -1524,7 +1705,7 @@ mod tests {
         let mut state = center();
         state
             .apply(Request::Report {
-                tool: "pi".into(),
+                tool: "custom".into(),
                 pane_id: "%1".into(),
                 process_generation: "generation".into(),
                 sequence: 1,
@@ -1536,6 +1717,8 @@ mod tests {
         let moved_pane = PaneRow {
             session_name: "agent-new".into(),
             session_id: "$2".into(),
+            window_id: "@1".into(),
+            window_activity: 1,
             pane_id: "%1".into(),
             command: "pi".into(),
             pane_pid: 1,
@@ -1553,7 +1736,7 @@ mod tests {
 
         state
             .apply(Request::Report {
-                tool: "pi".into(),
+                tool: "custom".into(),
                 pane_id: "%1".into(),
                 process_generation: "generation".into(),
                 sequence: 2,
@@ -1582,6 +1765,114 @@ mod tests {
 
         state.prune_retired_generations(now + RETIRED_GENERATION_TTL + Duration::from_secs(1));
         assert!(state.retired_event_generations.is_empty());
+    }
+
+    #[test]
+    fn dirty_screen_selection_skips_old_unchanged_windows() {
+        let grace = Duration::from_secs(2);
+        assert!(!should_capture_screen(
+            true,
+            false,
+            false,
+            100,
+            Some(100),
+            200,
+            grace,
+        ));
+        assert!(should_capture_screen(
+            true,
+            false,
+            false,
+            101,
+            Some(100),
+            200,
+            grace,
+        ));
+    }
+
+    #[test]
+    fn dirty_screen_selection_keeps_recent_and_safety_scans() {
+        let grace = Duration::from_secs(2);
+        assert!(should_capture_screen(
+            true,
+            false,
+            false,
+            100,
+            Some(100),
+            102,
+            grace,
+        ));
+        assert!(should_capture_screen(
+            true,
+            false,
+            true,
+            100,
+            Some(100),
+            200,
+            grace,
+        ));
+        assert!(should_capture_screen(
+            true,
+            true,
+            false,
+            100,
+            Some(100),
+            200,
+            grace,
+        ));
+        assert!(should_capture_screen(
+            false,
+            false,
+            false,
+            100,
+            Some(100),
+            200,
+            grace,
+        ));
+    }
+
+    #[test]
+    fn plain_working_to_idle_requires_stable_confirmations() {
+        let mut pending = PendingIdleConfirmation::default();
+        let now = Instant::now();
+        let idle = detection(AgentState::Idle);
+        assert!(pending.should_hold(AgentState::Working, idle, now));
+        assert!(pending.should_hold(AgentState::Working, idle, now + PENDING_IDLE_RECHECK));
+        assert!(pending.should_hold(AgentState::Working, idle, now + PENDING_IDLE_RECHECK * 2));
+        assert!(!pending.should_hold(AgentState::Working, idle, now + PENDING_IDLE_RECHECK * 3));
+        assert_eq!(pending, PendingIdleConfirmation::default());
+    }
+
+    #[test]
+    fn visible_idle_signal_bypasses_stability_delay() {
+        let mut pending = PendingIdleConfirmation::default();
+        assert!(!pending.should_hold(
+            AgentState::Working,
+            visible_idle_detection(),
+            Instant::now(),
+        ));
+    }
+
+    #[test]
+    fn plain_idle_confirmation_has_a_bounded_delay() {
+        let mut pending = PendingIdleConfirmation::default();
+        let now = Instant::now();
+        let idle = detection(AgentState::Idle);
+        assert!(pending.should_hold(AgentState::Working, idle, now));
+        assert!(!pending.should_hold(AgentState::Working, idle, now + PENDING_IDLE_CAP,));
+    }
+
+    #[test]
+    fn pi_screen_detects_working_literal_and_idle_fallback() {
+        assert_eq!(detect_pi("Working...").state, AgentState::Working);
+        assert_eq!(detect_pi("tokens 1.2k  working...").state, AgentState::Idle);
+        assert_eq!(detect_pi("Ready for input").state, AgentState::Idle);
+    }
+
+    #[test]
+    fn canonical_screen_tools_include_pi() {
+        assert_eq!(canonical_screen_tool("pi").as_deref(), Some("pi"));
+        assert!(is_screen_detected_tool("pi"));
     }
 
     #[test]

@@ -151,7 +151,7 @@ classify() {
   done)    rank=1; label='🔵 done   '; desc='finished, unseen' ;;
   idle)    rank=2; label='🟢 idle   '; desc='waiting for prompt' ;;
   working) rank=3; label='🟡 working'; desc='actively running' ;;
-  *)       rank=2; label='⚪ unknown'; desc='no status extension' ;;
+  *)       rank=2; label='⚪ unknown'; desc='no detected status' ;;
   esac
 }
 
@@ -444,7 +444,7 @@ kill_target() {
     ;;
   pane)
     # Ctrl-C interrupts the current turn; it does not prove the long-lived CLI
-    # exited, so keep daemon state and Claude polling active.
+    # exited, so keep daemon state and agent screen polling active.
     tmux send-keys -t "$target" C-c 2>/dev/null
     ;;
   esac

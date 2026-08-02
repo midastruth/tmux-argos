@@ -22,7 +22,6 @@ fi
 
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$DIR/.." && pwd)"
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
 
@@ -38,7 +37,7 @@ fi
 
 path="${1:-$PWD}"
 window="${2:-}"
-default_cmd="pi -e '$ROOT/extensions/tmux-state.ts'"
+default_cmd='pi'
 
 # Collect configured agent names. Avoid bash 4's `mapfile` so this keeps working
 # on macOS's default /bin/bash 3.2.

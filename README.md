@@ -15,8 +15,8 @@ or swap agents via `@agent_agents`.
 
 - 🔢 **Central picker** (`prefix` + `u`) listing every managed agent tmux session, plus panes where a known agent (pi/codex/claude) was started manually. A tool column shows which agent each row is.
 - 🤖 **Multi-agent and multi-instance**: manage pi, codex, and claude side by side; each `prefix` + `y` launch creates a numbered instance such as `pi-1`, `pi-2`, and `pi-3` by default.
-- 🟡 **Live status** per session: `blocked` / `working` / `done` / `idle` (Pi
-  events plus Herdr-style Codex/Claude screen detection).
+- 🟡 **Live status** per session: `blocked` / `working` / `done` / `idle`
+  (Herdr-style Pi/Codex/Claude screen detection; no agent extension required).
 - 👁️ **Live preview** of each session's screen in the picker.
 - 📜 **Unified history**: press `Tab` in the picker to search saved Pi, Codex,
   and Claude conversations, preview recent messages, and resume one in a managed popup.
@@ -160,7 +160,7 @@ The plugin manages multiple agents at once. The launchable agents are defined by
 the `@agent_agents` registry (one `name=command` per line); the default is:
 
 ```tmux
-set -g @agent_agents "pi=pi -e '/path/to/extensions/tmux-state.ts'
+set -g @agent_agents "pi=pi
 codex=codex
 claude=claude"
 ```
@@ -180,26 +180,23 @@ claude=claude"
 - `@agent_detect_wrappers` controls which wrapper commands (default `node bun npx npm pnpm yarn`) are allowed to trigger a child-process scan.
 
 Make sure each agent's command is on your `PATH` (`pi`, `codex`, `claude`).
-Pi reports through the bundled extension. Codex and Claude are detected by the
-daemon from their tmux pane process, terminal title, and captured screen text.
+The daemon detects all three directly from their tmux pane process, terminal
+title, and live screen text. Pi does not need a Pi extension or modified launch
+command.
 
 ## Unified status daemon
 
 A single-thread-owned Rust daemon is the authoritative runtime state center for
-each tmux server. It uses a private mode-0600 Unix socket, restores Pi mirror
-options once at startup, accepts Pi lifecycle events keyed by immutable tmux
-session IDs, and periodically applies
-Herdr-style screen detection for Codex and Claude. The Pi extension and
-`scripts/state.sh` continue writing tmux mirror options so the daemon can recover
-after restart and the picker can display reliable state if a daemon snapshot is
-temporarily unavailable.
+each tmux server. It uses a private mode-0600 Unix socket, periodically discovers
+Pi/Codex/Claude processes, captures dirty live bottom screens, and applies
+Herdr-style state rules keyed by immutable pane and tmux session IDs.
 
-| Agent event | State |
+| Observed transition | State |
 | --- | --- |
-| session start / shutdown | `idle` |
-| turn start | `working` |
-| turn end while not watched | `done` |
-| turn end while watched | `idle` |
+| agent waiting for input | `idle` |
+| active turn signal | `working` |
+| visible approval or answer prompt | `blocked` |
+| `working`/`blocked` becomes idle while not watched | `done` |
 
 Opening a `done` pane sends `Seen`; `done` remains until then. `working` and
 `blocked` expire after `@agent_state_ttl`. Picker-initiated exits carry
@@ -210,25 +207,28 @@ records against the live tmux pane and session IDs on its regular scan; tmux's
 `after-kill-pane` is intentionally not used because tmux does not expose the
 removed pane identity there. Existing hooks are never overwritten.
 
-### Pi reporting
+### Pi, Codex, and Claude screen detection
 
-The default Pi command loads `extensions/tmux-state.ts`. Each extension process
-creates a fresh process generation and sends monotonic sequences, preventing an
-old event or reused pane id from overwriting a newer process.
+The daemon scans tmux pane metadata every `@agent_screen_interval_ms`. A pane is
+a candidate when its configured `@agent_tool`, current command, or an allowed
+wrapper descendant matches `pi`, `codex`, `claude`, or `claude-code`.
 
-`state.sh` is kept for Pi-compatible hooks. Codex and Claude reports sent through
-`state.sh` are ignored because their state is owned by the screen detector.
+The daemon uses tmux's `#{window_activity}` timestamp to mark candidate panes
+dirty and captures only new, recently active, or pending-confirmation panes. A
+bounded full scan every `@agent_screen_full_scan_interval_ms` protects against a
+missed or coarse timestamp. A control-mode `%output` client is intentionally not
+used: control mode only emits pane output for its attached session, so monitoring
+all independent agent sessions would require hidden attached clients that alter
+`session_attached`, `destroy-unattached`, and pane sizing semantics.
 
-### Codex and Claude screen detection
-
-The daemon scans tmux panes every `@agent_screen_interval_ms`. A pane is a
-Codex/Claude candidate when its configured `@agent_tool`, current command, or an
-allowed wrapper descendant matches `codex`, `claude`, or `claude-code`.
-
-For each candidate pane the daemon reads:
+For each dirty candidate pane the daemon reads:
 
 - `#{pane_title}` for OSC title signals.
-- `tmux capture-pane -p -J -S -80` for recent visible text.
+- `tmux capture-pane -p -J` for the live bottom screen without scrollback.
+
+Following Herdr's Pi screen manifest, the exact visible literal `Working...` is
+`working`; otherwise Pi is `idle`. Pi currently has no high-confidence visible
+`blocked` rule.
 
 Codex rules mirror Herdr's high-value signals: `Action Required` in the title is
 `blocked`, a Braille-spinner title is `working`, approval/answer prompts after
@@ -238,7 +238,10 @@ Claude rules mirror Herdr's screen heuristics: a Braille-spinner title is
 `working`, visible permission/menu prompts are `blocked`, a live `❯` prompt box
 is `idle`, transcript/model-picker views are ignored, and a `✳` title is `idle`.
 
-When Codex/Claude transitions from `working` or `blocked` to `idle`, the daemon
+Following Herdr, a plain `working` to `idle` transition is confirmed with three
+100ms rechecks, bounded to 700ms, so a transient TUI redraw does not publish a
+false completion. A high-confidence visible idle signal bypasses the delay.
+When Pi/Codex/Claude settles from `working` or `blocked` to `idle`, the daemon
 publishes `done` if the pane is not currently visible; opening the pane sends
 `Seen` and changes `done` to `idle`.
 
@@ -319,8 +322,9 @@ refresh fails.
 
 Animation frames are whitespace-separated; a frame itself cannot contain a
 space. The daemon validates non-empty bounded frames, minimum 250ms animation
-and screen-detection intervals, and non-negative TTL. Invalid reload retains the
-old config; successful reload immediately reconciles state.
+and screen-detection intervals, requires the full-scan interval to be at least
+the regular screen interval, and accepts a non-negative TTL. Invalid reload
+retains the old config; successful reload immediately reconciles state.
 
 ### Clickable status badges
 
@@ -390,8 +394,9 @@ set -g @agent_status_icon_done       '✓'
 set -g @agent_status_icon_idle       '·'
 set -g @agent_status_anim_frames     '✦ ✷ ✹ ✴'
 set -g @agent_animation_interval_ms  '1000'
-set -g @agent_screen_interval_ms     '1000'
-set -g @agent_state_ttl              '259200'
+set -g @agent_screen_interval_ms           '1000'
+set -g @agent_screen_full_scan_interval_ms '30000'
+set -g @agent_state_ttl                    '259200'
 set -g @agent_daemon_binary '/path/to/daemon/target/release/tmux-argos-state-daemon'
 ```
 
@@ -419,7 +424,7 @@ tmux run-shell /path/to/tmux-argos/tmux-argos.tmux
   that agent, records the origin window, agent, and instance, then attaches to it
   in a popup. With `@agent_multiple_instances off`, it instead opens or reuses the
   unnumbered session.
-- The bundled **Pi extension** and `scripts/state.sh` mirror recovery options and send sequenced events to the per-server daemon.
+- The **daemon** discovers Pi, Codex, and Claude panes and derives their state from the live bottom screen without agent extensions.
 - The **picker** lists tmux sessions matching the prefix and non-prefixed panes
   whose current command is in `@agent_detect_commands` (or a configured wrapper
   whose child process matches), reads state for managed sessions, shows a live
@@ -428,7 +433,7 @@ tmux run-shell /path/to/tmux-argos/tmux-argos.tmux
   `tmux-argos-history` binary; history previews are plain conversation text and
   Enter launches the agent's native resume command. This is where process and
   history discovery happen.
-- The **daemon** owns live state, Claude polling, TTL and animation, and publishes a cache-only zero-fork status segment.
+- The **daemon** owns live state, agent screen polling, TTL and animation, and publishes a cache-only zero-fork status segment.
 - Pressing `prefix` + `u` from inside an agent popup first detaches that popup,
   then reopens the picker on the outer tmux client.
 

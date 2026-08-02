@@ -61,17 +61,17 @@ EOF
 # Succeeds when tmux reports that <pane> is currently visible: its session is
 # attached, its window is active, and it is the active pane. Used to skip a stale
 # "done" badge when the user watched the turn finish in the current pane.
-# Mirrors isWatchedAgentPane() in extensions/tmux-state.ts.
 is_watched_agent_pane() {
   is_pane_visible "$1"
 }
 
 # mark_managed_session_seen_if_done <session>
 # Opening a managed session that has reported session-scoped "done" marks that
-# finished turn as seen. Pi/state.sh write both session-scoped and pane-scoped
-# @agent_state; tmux formats such as #{@agent_state} may prefer a pane option, so
-# also clear pane-scoped "done" values. A pane-scoped stale "done" must not reset
-# an authoritative session-level "working"/"blocked" state.
+# finished turn as seen. State reporters may write both session-scoped and
+# pane-scoped @agent_state; tmux formats such as #{@agent_state} may prefer a
+# pane option, so also clear pane-scoped "done" values. A stale pane-scoped
+# "done" must not reset an authoritative session-level "working"/"blocked"
+# state.
 mark_managed_session_seen_if_done() {
   local session="$1" session_state pane pane_state now event_q
   session_state="$(tmux show-options -qv -t "$session" @agent_state 2>/dev/null || true)"
@@ -246,14 +246,13 @@ resolve_pane_agent() {
 }
 
 # agents_config
-# Newline-separated "name=command" registry of launchable agents. The default
-# wires pi to the bundled status extension; codex and claude run bare. Override
-# the whole list with @agent_agents, or just pi's command with
-# @agent_default_command.
-#   set -g @agent_agents 'pi=pi -e /path/ext.ts\ncodex=codex\nclaude=claude --foo'
+# Newline-separated "name=command" registry of launchable agents. Pi, Codex,
+# and Claude run directly because the daemon detects their state from the live
+# tmux screen. Override the whole list with @agent_agents, or just pi's command
+# with @agent_default_command.
+#   set -g @agent_agents 'pi=pi\ncodex=codex\nclaude=claude --foo'
 # <pi-default-command> is used for the pi entry's command when neither the
-# registry nor @agent_default_command is set, so callers pass the
-# extension-aware default in.
+# registry nor @agent_default_command is set.
 agents_config() {
   local pi_default="$1"
   local configured default_command
