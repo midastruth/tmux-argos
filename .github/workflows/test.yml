@@ -58,6 +58,9 @@ jobs:
       - name: Prove critical state and protocol tests kill every viable mutant
         run: bash tests/mutation.sh
 
+      - name: Prove Bash behavior tests kill every reviewed fault
+        run: bash tests/bash_mutation.sh
+
   security-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -33,15 +33,22 @@
 - `scripts/`：启动、状态管理与共享 Bash 逻辑；选择器按 common/rows/actions 分层，`scripts/lib/` 保存独立 AWK 程序。
 - `daemon/`：Pi、Codex、Claude 屏幕状态检测、状态缓存及历史读取，按事件、扫描、输出、检测和 I/O 职责拆分。
 - `spec/`：Gherkin 已知需求及其可执行验收测试映射。
-- `tests/run.sh`：主要 Bash 行为与回归测试套件。
+- `tests/run.sh`：主要 Bash 行为与回归测试实现；允许在不改变裁决能力的前提下重构或重命名。
+- `tests/bash_mutation.sh`：Bash 已知错误语料，要求行为测试持续杀死每个已审查 mutant。
 - `tests/quality_metrics.py`：文件、函数、复杂度与重复率硬门禁。
 - `tests/perf_smoke.sh`、`tests/system.sh`、`tests/mutation.sh`、`tests/security.sh`、`tests/flaky.sh`：深层证伪器。
+- `tests/suite_contract.py`、`tests/meta.sh`：门禁接线、阈值、保护边界及证伪器自身的能力契约。
 
 ## 测试宪法区
 
-- `tests/**`、`spec/**`、`daemon/fixtures/**`、`.github/workflows/**`、`.github/CODEOWNERS`、`.pi/extensions/test-constitution.ts` 和本文件属于人维护的宪法区。
-- agent 可以读取和执行宪法区，但不得编辑、覆盖、删除、移动、跳过或放宽其中的测试、契约、阈值与 CI 裁决。
-- 如果需求必须改变可执行规范，停止实现并请人先提供或明确批准对应的宪法区补丁。测试失败时修复生产代码，不修改反驳装置。
+- 宪法区只保护“裁决能力层”，而不冻结行为测试的具体实现。受保护文件为：
+  - `tests/architecture.sh`、`tests/bash_mutation.sh`、`tests/flaky.sh`、`tests/gherkin_contract.py`
+  - `tests/meta.sh`、`tests/mutation.sh`、`tests/perf_smoke.sh`、`tests/quality.sh`、`tests/quality_metrics.py`
+  - `tests/security.sh`、`tests/suite_contract.py`、`tests/system.sh`、`tests/test_constitution.mjs`、`tests/verify.sh`
+  - `spec/**`、`daemon/fixtures/**`、`.github/workflows/**`、`.github/CODEOWNERS`、`.pi/extensions/test-constitution.ts` 和本文件
+- `tests/run.sh`、`tests/lib/**` 以及 Rust `#[test]` 可以重构、拆分或重命名，但不得改变裁决能力；修改后必须继续杀死 `tests/bash_mutation.sh` 和 `tests/mutation.sh` 定义的同一组错误。
+- agent 可以读取和执行宪法区，但不得编辑、覆盖、删除、移动、跳过或放宽其中的错误语料、契约、阈值与 CI 裁决。
+- 如果需求必须改变可执行规范或已知错误语料，停止实现并请人先提供或明确批准对应的宪法区补丁。测试失败时修复生产代码或行为测试实现，不修改反驳装置。
 - 不使用环境变量、命令行选项、`skip`、忽略规则或局部替代命令绕过失败门禁。
 
 ## 验证
@@ -60,6 +67,7 @@ bash tests/verify.sh
 bash tests/perf_smoke.sh
 bash tests/system.sh
 bash tests/mutation.sh
+bash tests/bash_mutation.sh
 bash tests/security.sh
 bash tests/flaky.sh
 ```

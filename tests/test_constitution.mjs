@@ -45,15 +45,15 @@ async function invoke(toolName, input, context) {
   return toolCallHandler({ toolName, input, toolCallId: "test-call" }, context);
 }
 
-test("protected write is allowed only after the human selects one-time approval", async () => {
+test("protected capability write is allowed only after one-time approval", async () => {
   const { context, prompts } = createContext({ selection: ALLOW_ONCE_OPTION });
-  const result = await invoke("write", { path: "tests/generated.txt", content: "x" }, context);
+  const result = await invoke("write", { path: "tests/bash_mutation.sh", content: "x" }, context);
 
   assert.equal(result, undefined);
   assert.equal(prompts.length, 1);
   assert.deepEqual(prompts[0].options, [REJECT_OPTION, ALLOW_ONCE_OPTION]);
   assert.match(prompts[0].title, /write/);
-  assert.match(prompts[0].title, /tests\/generated\.txt/);
+  assert.match(prompts[0].title, /tests\/bash_mutation\.sh/);
 });
 
 test("protected edit is blocked when the human keeps the default rejection", async () => {
@@ -89,17 +89,34 @@ test("protected mutation without an interactive UI fails closed", async () => {
 });
 
 test("protected shell mutation is allowed only after one-time human approval", async () => {
-  const command = "printf x > tests/generated.txt";
+  const command = "printf x > tests/suite_contract.py";
   const { context, prompts } = createContext({ selection: ALLOW_ONCE_OPTION });
   const result = await invoke("bash", { command }, context);
 
   assert.equal(result, undefined);
   assert.equal(prompts.length, 1);
   assert.match(prompts[0].title, /bash/);
-  assert.match(prompts[0].title, /printf x > tests\/generated\.txt/);
+  assert.match(prompts[0].title, /printf x > tests\/suite_contract\.py/);
 });
 
-test("unprotected mutation proceeds without asking for human approval", async () => {
+test("behavior-test refactoring proceeds without human approval", async () => {
+  const { context, prompts } = createContext({ selection: REJECT_OPTION });
+  const result = await invoke("edit", { path: "tests/run.sh", edits: [] }, context);
+
+  assert.equal(result, undefined);
+  assert.equal(prompts.length, 0);
+});
+
+test("behavior-test shell refactoring proceeds without human approval", async () => {
+  const command = "printf x > tests/run.sh";
+  const { context, prompts } = createContext({ selection: REJECT_OPTION });
+  const result = await invoke("bash", { command }, context);
+
+  assert.equal(result, undefined);
+  assert.equal(prompts.length, 0);
+});
+
+test("production mutation proceeds without asking for human approval", async () => {
   const { context, prompts } = createContext({ selection: REJECT_OPTION });
   const result = await invoke("edit", { path: "scripts/helpers.sh", edits: [] }, context);
 

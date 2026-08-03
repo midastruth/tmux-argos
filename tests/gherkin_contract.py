@@ -26,29 +26,33 @@ def feature_test_ids(features_root: Path) -> list[str]:
     return ids
 
 
-def acceptance_map(path: Path) -> dict[str, tuple[str, str]]:
-    mappings: dict[str, tuple[str, str]] = {}
+def acceptance_map(path: Path) -> dict[str, str]:
+    mappings: dict[str, str] = {}
     for line_number, line in enumerate(path.read_text().splitlines(), start=1):
         if not line.strip():
             continue
         fields = line.split("\t")
-        if len(fields) != 3:
-            raise ValueError(f"{path}:{line_number}: expected id, suite, and test name")
-        test_id, suite, test_name = fields
+        if len(fields) != 2:
+            raise ValueError(f"{path}:{line_number}: expected id and suite")
+        test_id, suite = fields
         if test_id in mappings:
             raise ValueError(f"{path}:{line_number}: duplicate test id {test_id}")
         if suite not in {"bash", "rust"}:
             raise ValueError(f"{path}:{line_number}: unsupported suite {suite}")
-        mappings[test_id] = (suite, test_name)
+        mappings[test_id] = suite
     return mappings
 
 
-def rust_test_names(root: Path) -> set[str]:
-    names: set[str] = set()
-    for path in (root / "daemon" / "src").rglob("*.rs"):
-        text = path.read_text()
-        names.update(re.findall(r"#\[test\]\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)", text))
-    return names
+def acceptance_markers(root: Path) -> dict[str, list[tuple[str, Path]]]:
+    markers: dict[str, list[tuple[str, Path]]] = {}
+    marker_pattern = re.compile(r"@acceptance-id:([A-Za-z0-9_-]+)")
+    for path in sorted((root / "tests").rglob("*.sh")):
+        for test_id in marker_pattern.findall(path.read_text()):
+            markers.setdefault(test_id, []).append(("bash", path))
+    for path in sorted((root / "daemon" / "src").rglob("*.rs")):
+        for test_id in marker_pattern.findall(path.read_text()):
+            markers.setdefault(test_id, []).append(("rust", path))
+    return markers
 
 
 def main() -> int:
@@ -68,14 +72,18 @@ def main() -> int:
         orphaned = sorted(set(mappings) - set(scenario_ids))
         failures.append(f"acceptance map mismatch; missing={missing}, orphaned={orphaned}")
 
-    bash_source = (root / "tests" / "run.sh").read_text()
-    rust_names = rust_test_names(root)
+    markers = acceptance_markers(root)
     for test_id in scenario_ids:
-        suite, test_name = mappings[test_id]
-        if suite == "bash" and f"'{test_name}'" not in bash_source:
-            failures.append(f"{test_id}: Bash acceptance test is missing: {test_name}")
-        if suite == "rust" and test_name not in rust_names:
-            failures.append(f"{test_id}: Rust acceptance test is missing: {test_name}")
+        expected_suite = mappings[test_id]
+        bindings = markers.get(test_id, [])
+        if len(bindings) != 1:
+            failures.append(f"{test_id}: expected one acceptance marker, found {bindings}")
+            continue
+        actual_suite, marker_path = bindings[0]
+        if actual_suite != expected_suite:
+            failures.append(
+                f"{test_id}: expected {expected_suite} marker, found {actual_suite} in {marker_path}"
+            )
 
     if failures:
         for failure in failures:

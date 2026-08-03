@@ -1,5 +1,5 @@
-immutable-session-open	bash	picker Enter cannot open a session ID injected through metadata
-protected-bulk-kill	bash	picker bulk kill keeps a renamed session with a current blocked daemon record
-malformed-state-fails-closed	bash	picker bulk kill fails on malformed daemon state
-unseen-completion	rust	idle_detection_on_unwatched_working_pane_becomes_done
-native-history-resume	bash	launch.sh resumes Pi history by file
+immutable-session-open	bash
+protected-bulk-kill	bash
+malformed-state-fails-closed	bash
+unseen-completion	rust
+native-history-resume	bash

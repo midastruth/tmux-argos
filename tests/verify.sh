@@ -32,6 +32,7 @@ require_command shellcheck
 
 run_gate 'L0 Pi constitution behavior' node "$ROOT/tests/test_constitution.mjs"
 run_gate 'L0 Gherkin-to-acceptance bindings' python3 "$ROOT/tests/gherkin_contract.py"
+run_gate 'L0 test-suite drift contract' python3 "$ROOT/tests/suite_contract.py"
 run_gate 'L1 architecture contracts' bash "$ROOT/tests/architecture.sh"
 run_gate 'L2 strict structural quality metrics' bash "$ROOT/tests/quality.sh"
 run_gate 'L2 ShellCheck zero warnings' \

@@ -272,6 +272,7 @@ assert_eq 'picker sanitizes tab-containing metadata to the fixed row schema' '13
 assert_eq 'picker tab-containing metadata retains the trusted session ID' "$(printf '$%s' 31)" \
   "$(printf '%s\n' "$injected_row" | cut -f11)"
 
+# @acceptance-id:immutable-session-open
 reset_mocks
 FZF_MOCK_OUTPUT="$injected_row"
 run_bash 'scripts/picker.sh test-client' >/dev/null
@@ -457,6 +458,7 @@ log_contents="$(<"$TMUX_LOG")"
 assert_contains 'launch.sh reports unknown named agent' "$log_contents" $'display-message\tUnknown agent: nope'
 assert_not_contains 'launch.sh does not open popup for unknown agent' "$log_contents" $'display-popup'
 
+# @acceptance-id:native-history-resume
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'
 TMUX_MOCK_OPTIONS=$'@agent_agents=pi=pi --custom'
@@ -588,6 +590,7 @@ assert_not_contains 'picker bulk kill never kills a same-name replacement' "$log
 # Both the status embedded in the displayed row and a fresh daemon snapshot can
 # protect a session. Any working/blocked daemon record protects the whole
 # session when it owns several agent records.
+# @acceptance-id:protected-bulk-kill
 reset_mocks
 printf '%s\n' \
   $'3\tsession\tagent-visible-working\t🟡 working\tvisible\t1m\t/tmp/visible\trunning\tpi\tworking\t$14\t\tvisible display' \
@@ -688,6 +691,7 @@ AGENT_DAEMON_BINARY="$MOCK_BIN/state-daemon"
 assert_eq 'picker bulk kill fails when current daemon state is unavailable' '1' "$rc"
 assert_not_contains 'picker bulk kill kills nothing when daemon state is unavailable' "$(<"$TMUX_LOG")" 'kill-session'
 
+# @acceptance-id:malformed-state-fails-closed
 reset_mocks
 printf '%s\n' $'2\tsession\tagent-safe\t🟢 idle   \tsafe\t1m\t/tmp/safe\twaiting\tpi\tidle\t$21\t\tsafe display' >"$matched_file"
 DAEMON_SNAPSHOT_ROWS=$'agent-safe\037$21\037%1\037working\037not-a-timestamp'

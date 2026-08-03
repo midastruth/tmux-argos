@@ -465,9 +465,11 @@ The executable evidence is divided by the kind of claim it tries to refute:
   to an executable acceptance test.
 - **Unknown counterexamples:** generated identifier properties cover 10,000
   cases and deterministic protocol fuzzing mutates 100,000 payloads.
-- **Tests of the tests:** `tests/meta.sh` seeds architecture, size, complexity,
-  and duplication faults; `tests/mutation.sh` requires every viable critical
-  state/protocol mutant to be killed.
+- **Tests of the tests:** `tests/meta.sh` seeds gate and policy faults;
+  `tests/suite_contract.py` rejects disconnected or relaxed gates;
+  `tests/bash_mutation.sh` requires Bash tests to kill the reviewed fault corpus,
+  while `tests/mutation.sh` requires every viable critical Rust mutant to be killed.
+  Behavior tests may be refactored or renamed as long as these capabilities remain.
 - **Composition and environment:** `tests/system.sh` exercises a real isolated
   tmux server, 100 concurrent clients, 20 daemon restart cycles, and 16/32MiB
   idle/pressure RSS budgets on Linux and macOS.
@@ -484,8 +486,9 @@ Additional gates are run separately and by CI:
 ```sh
 bash tests/perf_smoke.sh  # 100+100 item p95 <=200ms; growth <=2.5x
 bash tests/system.sh      # real tmux E2E, concurrency, memory, chaos
-bash tests/mutation.sh    # requires cargo-mutants 27.1.0
-bash tests/security.sh    # requires cargo-audit 0.22.2
+bash tests/mutation.sh      # requires cargo-mutants 27.1.0
+bash tests/bash_mutation.sh # reviewed Bash/tmux fault corpus
+bash tests/security.sh      # requires cargo-audit 0.22.2
 bash tests/flaky.sh       # twenty consecutive Rust and Bash runs
 ```
 
@@ -494,17 +497,19 @@ constitution and cannot be disabled or raised through environment variables.
 
 ### Human-owned executable specification
 
-`tests/**`, `spec/**`, CI workflows, `CODEOWNERS`, `AGENTS.md`, and the Pi protection
-extension are the constitutional boundary. Implementation agents may read and
-run them but must not change or weaken them without explicit human approval.
-`.pi/extensions/test-constitution.ts` intercepts normal Pi `write`/`edit` calls
-and common shell mutation paths, then shows a default-reject choice between
-rejecting the operation and allowing that single mutation. Cancellation or a
-run mode without interactive UI blocks the operation. Approval is never
-remembered, so every protected tool call requires a new human decision. This
-local hook is defense in depth, not a security boundary: enable GitHub branch
-protection, require every CI gate, and require CODEOWNER review
-for the final external decision. A human must approve changes to the executable
-specification when intended behavior changes.
+The constitutional boundary protects the capability layer rather than every test
+implementation: mutation corpora, gate contracts and thresholds, `spec/**`, CI,
+`CODEOWNERS`, fixtures, `AGENTS.md`, and the Pi protection extension. Ordinary
+Bash/Rust behavior tests may be refactored, split, or renamed without approval,
+but CI requires them to keep killing the same reviewed Bash and Rust faults.
+
+`.pi/extensions/test-constitution.ts` intercepts mutations to the protected
+capability files and common shell mutation paths, then shows a default-reject
+choice between rejecting the operation and allowing that single mutation.
+Cancellation or a run mode without interactive UI blocks the operation. Approval
+is never remembered. This local hook is defense in depth, not a security boundary:
+enable GitHub branch protection, require every CI gate, and require CODEOWNER
+review for the final external decision. A human must approve changes to the
+capability contract or intended behavior, but not behavior-preserving test refactors.
 
 

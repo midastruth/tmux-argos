@@ -64,6 +64,7 @@
         assert!(state.agents.is_empty());
     }
 
+    // @acceptance-id:unseen-completion
     #[test]
     fn idle_detection_on_unwatched_working_pane_becomes_done() {
         // A turn that finishes while the user is not looking at the pane must be
