@@ -1,6 +1,9 @@
 mod model;
 mod protocol;
 
+#[cfg(test)]
+mod allocation_metrics;
+
 use model::{Config, StateCenter};
 use protocol::{read_request, write_response, Request, Response};
 use std::env;
@@ -217,10 +220,10 @@ fn serve(paths: &RuntimePaths, server: &TmuxServerInfo) -> Result<(), String> {
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())?;
 
-    let (sender, receiver) = mpsc::sync_channel::<Incoming>(256);
-    spawn_acceptor(listener, sender);
     let config =
         Config::load(&server.socket).map_err(|e| format!("invalid initial config: {e}"))?;
+    let (sender, receiver) = mpsc::sync_channel::<Incoming>(256);
+    spawn_acceptor(listener, sender)?;
     let mut center = StateCenter::new(server.socket.clone(), config);
     center.restore_once();
     center.reconcile(Instant::now());
@@ -229,14 +232,24 @@ fn serve(paths: &RuntimePaths, server: &TmuxServerInfo) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_acceptor(listener: UnixListener, sender: SyncSender<Incoming>) {
+fn spawn_acceptor(listener: UnixListener, sender: SyncSender<Incoming>) -> Result<(), String> {
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
+        if ready_sender.send(()).is_err() {
+            return;
+        }
         for connection in listener.incoming() {
             let Ok(mut stream) = connection else {
                 continue;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
             match read_request(&mut stream) {
+                Ok(Request::Ensure) => {
+                    // Liveness probes do not depend on mutable state. Answering
+                    // in the acceptor keeps startup and hot-path probes from
+                    // waiting behind screen reconciliation or event batches.
+                    let _ = write_response(&mut stream, &Response::ok(None));
+                }
                 Ok(request) => {
                     if sender.send(Incoming { request, stream }).is_err() {
                         return;
@@ -248,6 +261,9 @@ fn spawn_acceptor(listener: UnixListener, sender: SyncSender<Incoming>) {
             }
         }
     });
+    ready_receiver
+        .recv()
+        .map_err(|_| "acceptor thread failed before readiness".to_string())
 }
 
 fn reconcile_center(center: &mut StateCenter) {

@@ -471,8 +471,9 @@ The executable evidence is divided by the kind of claim it tries to refute:
   while `tests/mutation.sh` requires every viable critical Rust mutant to be killed.
   Behavior tests may be refactored or renamed as long as these capabilities remain.
 - **Composition and environment:** `tests/system.sh` exercises a real isolated
-  tmux server, 100 concurrent clients, 20 daemon restart cycles, and 16/32MiB
-  idle/pressure RSS budgets on Linux and macOS.
+  tmux server, 100 concurrent clients, cold/warm startup latency, a 60-second
+  sustained CPU/RSS/file-descriptor/I/O budget, 20 daemon restart cycles, and
+  16/32MiB idle/pressure RSS budgets on Linux and macOS.
 - **Regression:** named regression tests preserve every security and lifecycle
   counterexample already found; screen heuristics use stable fixture strings.
 
@@ -484,8 +485,8 @@ whole fast feedback loop must complete within 30 seconds.
 Additional gates are run separately and by CI:
 
 ```sh
-bash tests/perf_smoke.sh  # 100+100 item p95 <=200ms; growth <=2.5x
-bash tests/system.sh      # real tmux E2E, concurrency, memory, chaos
+bash tests/perf_smoke.sh  # wall/CPU p95, growth, I/O and Rust allocations
+bash tests/system.sh      # real tmux startup, sustained CPU/RSS/FD/I/O, chaos
 bash tests/mutation.sh      # requires cargo-mutants 27.1.0
 bash tests/bash_mutation.sh # reviewed Bash/tmux fault corpus
 bash tests/security.sh      # requires cargo-audit 0.22.2
@@ -494,6 +495,12 @@ bash tests/flaky.sh       # twenty consecutive Rust and Bash runs
 
 Performance thresholds and repetition counts are part of the human-owned
 constitution and cannot be disabled or raised through environment variables.
+The picker gate limits wall p95 to 120ms, CPU p95 to 100ms, 50-to-100 growth to
+2x, one daemon call, two tmux calls and 64KiB of output. Rust allocation tests
+bound a hot report and a 100-record snapshot. The real-daemon gate limits cold
+startup to 100ms, warm ensure p95 to 10ms, sustained average requests to 5ms,
+daemon CPU to 100us/request, 60-second RSS growth to 1MiB, descriptor growth to
+zero, and snapshot output to 64KiB.
 
 ### Human-owned executable specification
 

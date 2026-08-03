@@ -107,9 +107,24 @@ expect_rejection 'suite-contract falsifier rejects a relaxed fast-feedback budge
 performance_fixture="$TMP_ROOT/performance-drift"
 cp -R "$suite_base_fixture" "$performance_fixture"
 mutate_once "$performance_fixture/tests/perf_smoke.sh" \
-  'max_picker_ms=200' 'max_picker_ms=2000'
+  'max_picker_ms=120' 'max_picker_ms=1200'
 expect_rejection 'suite-contract falsifier rejects a relaxed performance ceiling' \
   python3 "$ROOT/tests/suite_contract.py" "$performance_fixture"
+
+performance_cpu_fixture="$TMP_ROOT/performance-cpu-drift"
+cp -R "$suite_base_fixture" "$performance_cpu_fixture"
+mutate_once "$performance_cpu_fixture/tests/perf_smoke.sh" \
+  'max_picker_cpu_ms=100' 'max_picker_cpu_ms=1000'
+expect_rejection 'suite-contract falsifier rejects a relaxed CPU ceiling' \
+  python3 "$ROOT/tests/suite_contract.py" "$performance_cpu_fixture"
+
+allocation_fixture="$TMP_ROOT/allocation-drift"
+cp -R "$suite_base_fixture" "$allocation_fixture"
+mutate_once "$allocation_fixture/daemon/src/allocation_metrics.rs" \
+  'const MAX_REPORT_ALLOCATIONS: usize = 8;' \
+  'const MAX_REPORT_ALLOCATIONS: usize = 80;'
+expect_rejection 'suite-contract falsifier rejects a relaxed allocation ceiling' \
+  python3 "$ROOT/tests/suite_contract.py" "$allocation_fixture"
 
 stability_fixture="$TMP_ROOT/stability-drift"
 cp -R "$suite_base_fixture" "$stability_fixture"
@@ -126,9 +141,17 @@ expect_rejection 'suite-contract falsifier rejects lost protocol mutation covera
 
 system_gate_fixture="$TMP_ROOT/system-gate-drift"
 cp -R "$suite_base_fixture" "$system_gate_fixture"
-mutate_once "$system_gate_fixture/tests/system.sh" 'seq 1 100' 'seq 1 10'
+mutate_once "$system_gate_fixture/tests/system.sh" \
+  'concurrent_requests=100' 'concurrent_requests=10'
 expect_rejection 'suite-contract falsifier rejects reduced concurrency pressure' \
   python3 "$ROOT/tests/suite_contract.py" "$system_gate_fixture"
+
+sustained_gate_fixture="$TMP_ROOT/sustained-gate-drift"
+cp -R "$suite_base_fixture" "$sustained_gate_fixture"
+mutate_once "$sustained_gate_fixture/tests/system.sh" \
+  'sustained_seconds=60' 'sustained_seconds=6'
+expect_rejection 'suite-contract falsifier rejects reduced sustained load duration' \
+  python3 "$ROOT/tests/suite_contract.py" "$sustained_gate_fixture"
 
 security_gate_fixture="$TMP_ROOT/security-gate-drift"
 cp -R "$suite_base_fixture" "$security_gate_fixture"

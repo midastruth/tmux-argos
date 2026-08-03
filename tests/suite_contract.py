@@ -101,8 +101,32 @@ def check_deep_gates(root: Path, failures: list[str]) -> None:
         {
             "20 measured runs": "iterations=20",
             "three warmups": "warmup=3",
-            "200ms p95 ceiling": "max_picker_ms=200",
-            "2.5x growth ceiling": "max_growth=2.5",
+            "ten CPU measurements": "cpu_iterations=10",
+            "120ms p95 ceiling": "max_picker_ms=120",
+            "100ms CPU p95 ceiling": "max_picker_cpu_ms=100",
+            "2x growth ceiling": "max_growth=2.0",
+            "two tmux call ceiling": "max_tmux_calls=2",
+            "one daemon call ceiling": "max_daemon_calls=1",
+            "64KiB picker output ceiling": "max_output_bytes=65536",
+        },
+        failures,
+    )
+    require_fragments(
+        root / "tests/perf_smoke.sh",
+        {
+            "picker CPU timing": "measure_cpu 'picker.sh --list n=100'",
+            "picker tmux I/O accounting": 'tmux_calls="$(awk',
+            "Rust allocation gate": "allocation_metrics::state_hot_paths_stay_within_allocation_budgets",
+        },
+        failures,
+    )
+    require_exact_lines(
+        root / "daemon/src/allocation_metrics.rs",
+        {
+            "report allocation count": "const MAX_REPORT_ALLOCATIONS: usize = 8;",
+            "report allocation bytes": "const MAX_REPORT_BYTES: usize = 512;",
+            "snapshot allocation count": "const MAX_SNAPSHOT_ALLOCATIONS: usize = 3_000;",
+            "snapshot allocation bytes": "const MAX_SNAPSHOT_BYTES: usize = 192 * 1024;",
         },
         failures,
     )
@@ -144,11 +168,33 @@ def check_deep_gates(root: Path, failures: list[str]) -> None:
     require_fragments(
         root / "tests/system.sh",
         {
-            "100 concurrent clients": "for request_number in $(seq 1 100)",
+            "100 concurrent clients": 'for request_number in $(seq 1 "$concurrent_requests")',
             "twenty restart cycles": "for _cycle in $(seq 1 20)",
             "16MiB idle RSS": '"$idle_rss_kib" -le 16384',
             "32MiB pressure RSS": '"$rss_kib" -le 32768',
             "real isolated tmux": 'tmux -L "$SOCKET_NAME" -f /dev/null new-session',
+            "cold startup timing": 'startup_started_at="$(now_ns)"',
+            "warm request p95": 'warm_request_p95_ms="$(measure_warm_request_p95 || true)"',
+            "sustained CPU accounting": 'sustained_cpu_us_per_request="$(awk',
+            "sustained RSS accounting": "sustained_rss_growth_kib=",
+            "sustained descriptor accounting": 'sustained_fds_before="$(open_fd_count',
+            "snapshot I/O accounting": 'snapshot_bytes="$(printf',
+        },
+        failures,
+    )
+    require_exact_lines(
+        root / "tests/system.sh",
+        {
+            "100ms cold startup ceiling": "startup_max_ms=100",
+            "20 warm request measurements": "warm_request_iterations=20",
+            "10ms warm request p95 ceiling": "warm_request_p95_max_ms=10",
+            "100 concurrent requests": "concurrent_requests=100",
+            "60 second sustained load": "sustained_seconds=60",
+            "ten thousand request floor": "sustained_min_requests=10000",
+            "5ms sustained request ceiling": "sustained_average_max_ms=5",
+            "100us daemon CPU ceiling": "sustained_cpu_max_us_per_request=100",
+            "1MiB sustained RSS growth ceiling": "sustained_rss_growth_max_kib=1024",
+            "64KiB snapshot ceiling": "snapshot_max_bytes=65536",
         },
         failures,
     )

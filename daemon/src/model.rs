@@ -151,7 +151,7 @@ impl Config {
     }
 
     #[cfg(test)]
-    fn test() -> Self {
+    pub(crate) fn test() -> Self {
         Self {
             prefix: "agent-".into(),
             status_enabled: true,
