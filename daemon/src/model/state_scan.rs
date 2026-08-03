@@ -109,9 +109,24 @@ impl StateCenter {
             .retain(|key, _| active_keys.contains(key));
     }
 
+    /// Drops confirmations that can no longer resolve and reports whether any
+    /// live confirmation still justifies the fast recheck interval.
+    fn retain_resolvable_idle_confirmations(&mut self, now: Instant) -> bool {
+        self.pending_idle_confirmations.retain(|_, confirmation| {
+            let Some(started_at) = confirmation.started_at else {
+                return true;
+            };
+            now.saturating_duration_since(started_at) < PENDING_IDLE_CAP
+        });
+        !self.pending_idle_confirmations.is_empty()
+    }
+
     fn scan_screen_agents(&mut self, now: Instant) -> bool {
         let Some(rows) = list_pane_rows(&self.server_socket) else {
-            return !self.pending_idle_confirmations.is_empty();
+            // Without a pane list no capture can advance or expire a pending
+            // confirmation, so an expired one must not keep asking for a
+            // 100ms recheck forever.
+            return self.retain_resolvable_idle_confirmations(now);
         };
         self.remove_exited_records(&rows, now);
         let full_scan = now >= self.full_screen_scan_deadline;
@@ -132,7 +147,7 @@ impl StateCenter {
             }
         }
         self.prune_inactive_screens(&active_keys);
-        !self.pending_idle_confirmations.is_empty()
+        self.retain_resolvable_idle_confirmations(now)
     }
 
     fn remove_exited_records(&mut self, rows: &[PaneRow], now: Instant) {

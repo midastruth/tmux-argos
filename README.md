@@ -119,12 +119,16 @@ Sessions displayed as `working` or `blocked` are protected. After confirmation,
 the picker reads a fresh daemon snapshot so time spent at the prompt does not
 make the decision depend on stale pre-confirmation state. Any current `working`
 or `blocked` record protects the entire session even if another record for that
-session is idle. Immediately before each deletion, the picker also reads the
-session-scoped tmux mirror. This protects a Pi turn whose mirror has changed to
-`working` before its daemon event has arrived. If daemon state is unavailable or
-malformed, or any matched picker row does not have the complete expected schema,
-the bulk kill aborts without killing anything. `idle`, `done`, and `unknown`
-matched sessions are eligible.
+session is idle. Immediately before each deletion, the picker re-reads
+authoritative daemon state for that exact session and also reads the
+session-scoped tmux mirror. Screen-detected agents (`pi`, `codex`, `claude`)
+never write the session mirror, so only the daemon re-read can protect a turn
+that started while earlier kills in the same batch were running; the mirror
+re-read protects a turn whose mirror changed before its daemon event arrived.
+If daemon state is unavailable or malformed at any of these points, or any
+matched picker row does not have the complete expected schema, the bulk kill
+aborts without killing anything more. `idle`, `done`, and `unknown` matched
+sessions are eligible.
 
 Each managed row also carries tmux's immutable `session_id`. Opening, preview,
 state protection, deletion, and lifecycle reporting all use that ID rather than

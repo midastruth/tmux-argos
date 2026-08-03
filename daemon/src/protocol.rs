@@ -78,8 +78,13 @@ fn validate_field(name: &str, value: &str) -> Result<(), String> {
 fn validate_identifier(name: &str, value: &str, prefix: char) -> Result<(), String> {
     validate_field(name, value)?;
     let mut characters = value.chars();
-    if characters.next() != Some(prefix) || !characters.all(|character| character.is_ascii_digit())
-    {
+    if characters.next() != Some(prefix) {
+        return Err(format!("invalid {name}"));
+    }
+    // A bare prefix carries no tmux instance number, so it can never name a
+    // real pane or session. Require at least one digit after the prefix.
+    let digits = characters.as_str();
+    if digits.is_empty() || !digits.chars().all(|character| character.is_ascii_digit()) {
         return Err(format!("invalid {name}"));
     }
     Ok(())
