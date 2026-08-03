@@ -262,6 +262,56 @@
     }
 
     #[test]
+    fn failed_screen_scans_do_not_reschedule_fast_rechecks_forever() {
+        // A pending confirmation only justifies a 100ms recheck while it can
+        // still resolve. When tmux cannot be listed, no capture can advance or
+        // expire that confirmation, so requesting another fast recheck spins
+        // the daemon on tmux subprocesses for as long as the server lives.
+        let mut state = center();
+        let started_at = Instant::now() - PENDING_IDLE_CAP - Duration::from_millis(1);
+        state.pending_idle_confirmations.insert(
+            screen_key("pi", "%1"),
+            PendingIdleConfirmation {
+                started_at: Some(started_at),
+                confirmations: 1,
+            },
+        );
+
+        assert!(
+            !state.scan_screen_agents(Instant::now()),
+            "a failed scan past the confirmation cap must not request another fast recheck"
+        );
+        assert!(
+            state.pending_idle_confirmations.is_empty(),
+            "an expired confirmation must be cleared instead of pinning the fast interval"
+        );
+    }
+
+    #[test]
+    fn expired_idle_confirmations_stop_requesting_fast_rechecks() {
+        // The same bound must hold across repeated failures: the scan interval
+        // has to return to the configured screen interval rather than staying
+        // at PENDING_IDLE_RECHECK indefinitely.
+        let mut state = center();
+        let started_at = Instant::now() - PENDING_IDLE_CAP - Duration::from_millis(1);
+        state.pending_idle_confirmations.insert(
+            screen_key("pi", "%1"),
+            PendingIdleConfirmation {
+                started_at: Some(started_at),
+                confirmations: 0,
+            },
+        );
+
+        state.process_deadlines(Instant::now());
+
+        let next_wait = state.next_wait(Instant::now());
+        assert!(
+            next_wait > PENDING_IDLE_RECHECK,
+            "expired confirmations must not hold the daemon at the {PENDING_IDLE_RECHECK:?} recheck interval, got {next_wait:?}"
+        );
+    }
+
+    #[test]
     fn dirty_screen_selection_skips_old_unchanged_windows() {
         let grace = Duration::from_secs(2);
         assert!(!should_capture_screen(

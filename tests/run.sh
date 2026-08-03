@@ -26,11 +26,23 @@ install_tmux_mock "$MOCK_BIN"
 
 DAEMON_LOG="$TMP_ROOT/daemon.log"
 : >"$DAEMON_LOG"
+DAEMON_SNAPSHOT_CALLS="$TMP_ROOT/daemon-snapshot-calls"
+: >"$DAEMON_SNAPSHOT_CALLS"
+export DAEMON_SNAPSHOT_CALLS
 cat >"$MOCK_BIN/state-daemon" <<'DAEMON_MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DAEMON_LOG"
 if [ "${1:-}" = snapshot-picker ]; then
-  printf '%s' "${DAEMON_SNAPSHOT_ROWS:-}"
+  # Record every snapshot request so tests can assert how many times the picker
+  # consults authoritative state, and let a test model state that changes
+  # between the first read and a later revalidation read.
+  printf 'snapshot-picker\n' >>"$DAEMON_SNAPSHOT_CALLS"
+  if [ -n "${DAEMON_SNAPSHOT_ROWS_AFTER_FIRST:-}" ] &&
+    [ "$(grep -c . "$DAEMON_SNAPSHOT_CALLS")" -gt 1 ]; then
+    printf '%s' "$DAEMON_SNAPSHOT_ROWS_AFTER_FIRST"
+  else
+    printf '%s' "${DAEMON_SNAPSHOT_ROWS:-}"
+  fi
 elif [ "${1:-}" = snapshot ]; then
   printf '%s\n' "${DAEMON_SNAPSHOT:-{\"ok\":true,\"data\":{\"records\":[]}}}"
 else
@@ -73,7 +85,9 @@ reset_mocks() {
   : >"$TMUX_LOG"
   : >"$DAEMON_LOG"
   : >"$FZF_LOG"
-  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS HISTORY_MOCK_ROWS FZF_MOCK_OUTPUT
+  : >"$DAEMON_SNAPSHOT_CALLS"
+  unset DAEMON_SNAPSHOT DAEMON_SNAPSHOT_ROWS DAEMON_SNAPSHOT_ROWS_AFTER_FIRST \
+    HISTORY_MOCK_ROWS FZF_MOCK_OUTPUT
   unset TMUX_MOCK_OPTIONS TMUX_MOCK_TARGET_OPTIONS TMUX_MOCK_STATUS_OPTIONS \
     TMUX_MOCK_LIST_SESSIONS TMUX_MOCK_LIST_PANES TMUX_MOCK_LIST_CLIENTS \
     TMUX_MOCK_LIST_PANES_PICKER TMUX_MOCK_LIST_PANES_STATUS \
@@ -619,6 +633,37 @@ log_contents="$(<"$TMUX_LOG")"
 assert_contains 'picker bulk kill reads the current session mirror immediately before termination' "$log_contents" $'display-message\t-p\t-t\t$25\t#{@agent_state}'
 assert_not_contains 'picker bulk kill protects a working tmux-mirror transition' "$log_contents" $'kill-session\t-t\t$25'
 assert_contains 'picker bulk kill reports the mirror-protected transition' "$log_contents" 'killed 0 matched session(s), skipped 1 working/blocked'
+
+# Screen detection owns pi/codex/claude state and never writes the session tmux
+# mirror, so launch.sh's initial "idle" mirror stays idle for the whole session
+# lifetime. The final protection check must therefore consult the authoritative
+# daemon state again, not that permanently stale mirror.
+reset_mocks
+printf '%s\n' \
+  $'2\tsession\tagent-screen-working\t\xf0\x9f\x9f\xa2 idle   \tscreen\t1m\t/tmp/screen\twaiting\tpi\tidle\t$26\t\tscreen display' \
+  >"$matched_file"
+DAEMON_SNAPSHOT_ROWS=$'agent-screen-working\037$26\037%1\037idle\037100'
+DAEMON_SNAPSHOT_ROWS_AFTER_FIRST=$'agent-screen-working\037$26\037%1\037working\037200'
+TMUX_MOCK_TARGET_OPTIONS=$'$26|@agent_state=idle'
+run_confirmed_bulk_kill >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_not_contains 'picker bulk kill protects a session that started working after the pre-confirmation snapshot' "$log_contents" $'kill-session\t-t\t$26'
+assert_contains 'picker bulk kill reports the screen-detected working session as skipped' "$log_contents" 'killed 0 matched session(s), skipped 1 working/blocked'
+
+# The stale session mirror must not be the authority that permits a deletion.
+# A session whose only "idle" evidence is that mirror, while authoritative
+# state is unavailable for revalidation, must not be killed.
+reset_mocks
+printf '%s\n' \
+  $'2\tsession\tagent-stale-mirror\t\xf0\x9f\x9f\xa2 idle   \tstale\t1m\t/tmp/stale\twaiting\tpi\tidle\t$27\t\tstale display' \
+  >"$matched_file"
+DAEMON_SNAPSHOT_ROWS=$'agent-stale-mirror\037$27\037%1\037idle\037100'
+DAEMON_SNAPSHOT_ROWS_AFTER_FIRST='__unparseable daemon row__'
+TMUX_MOCK_TARGET_OPTIONS=$'$27|@agent_state=idle'
+run_confirmed_bulk_kill >/dev/null
+rc="$?"
+assert_eq 'picker bulk kill fails when state cannot be revalidated before deletion' '1' "$rc"
+assert_not_contains 'picker bulk kill does not fall back to the stale session mirror' "$(<"$TMUX_LOG")" $'kill-session\t-t\t$27'
 
 # Duplicate fzf rows must never produce duplicate kill attempts or lifecycle
 # events for the same session.

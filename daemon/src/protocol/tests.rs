@@ -53,6 +53,39 @@
     }
 
     #[test]
+    fn rejects_identifiers_that_are_only_a_prefix() {
+        // "$"/"%" carry no tmux instance number, so accepting them lets a client
+        // register records under an identity that can never match a real pane or
+        // session, corrupting snapshots and picker joins.
+        for pane_id in ["%", "$"] {
+            let request = Request::Seen {
+                pane_id: Some(pane_id.into()),
+            };
+            assert!(
+                validate_request(&request).is_err(),
+                "pane_id {pane_id:?} must be rejected"
+            );
+        }
+
+        let exited = Request::Exited {
+            pane_id: None,
+            session_id: Some("$".into()),
+        };
+        assert!(validate_request(&exited).is_err());
+
+        let report = Request::Report {
+            tool: "custom".into(),
+            pane_id: "%".into(),
+            process_generation: "g".into(),
+            sequence: 1,
+            state: AgentState::Idle,
+            session_id: "$".into(),
+            session_name: "work".into(),
+        };
+        assert!(validate_request(&report).is_err());
+    }
+
+    #[test]
     fn generated_identifier_boundaries_preserve_the_protocol_invariant() {
         for number in 0..10_000u64 {
             let valid = Request::Exited {
