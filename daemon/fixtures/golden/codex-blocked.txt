@@ -1,0 +1,3 @@
+› deploy
+Allow command?
+Press Enter to confirm or Esc to cancel

@@ -1,0 +1,9 @@
+# The executable specification is human-owned. Branch protection must require
+# CODEOWNER review for these rules to become an external enforcement boundary.
+/tests/ @midastruth
+/spec/ @midastruth
+/daemon/fixtures/ @midastruth
+/.github/workflows/ @midastruth
+/.github/CODEOWNERS @midastruth
+/.pi/extensions/test-constitution.ts @midastruth
+/AGENTS.md @midastruth

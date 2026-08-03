@@ -65,32 +65,54 @@ impl Response {
     }
 }
 
+fn validate_field(name: &str, value: &str) -> Result<(), String> {
+    let contains_delimiter = value
+        .bytes()
+        .any(|byte| matches!(byte, 0 | b'\n' | b'\r' | b'\t'));
+    if value.is_empty() || value.len() > MAX_FIELD_BYTES || contains_delimiter {
+        return Err(format!("invalid {name}"));
+    }
+    Ok(())
+}
+
+fn validate_identifier(name: &str, value: &str, prefix: char) -> Result<(), String> {
+    validate_field(name, value)?;
+    let mut characters = value.chars();
+    if characters.next() != Some(prefix) || !characters.all(|character| character.is_ascii_digit())
+    {
+        return Err(format!("invalid {name}"));
+    }
+    Ok(())
+}
+
+fn validate_report(
+    tool: &str,
+    pane_id: &str,
+    process_generation: &str,
+    session_id: &str,
+    session_name: &str,
+) -> Result<(), String> {
+    validate_field("tool", tool)?;
+    validate_identifier("pane_id", pane_id, '%')?;
+    validate_field("process_generation", process_generation)?;
+    validate_identifier("session_id", session_id, '$')?;
+    validate_field("session_name", session_name)
+}
+
+fn validate_exit(pane_id: Option<&str>, session_id: Option<&str>) -> Result<(), String> {
+    if pane_id.is_none() && session_id.is_none() {
+        return Err("Exited needs pane_id or session_id".into());
+    }
+    if let Some(value) = pane_id {
+        validate_identifier("pane_id", value, '%')?;
+    }
+    if let Some(value) = session_id {
+        validate_identifier("session_id", value, '$')?;
+    }
+    Ok(())
+}
+
 pub fn validate_request(request: &Request) -> Result<(), String> {
-    fn field(name: &str, value: &str) -> Result<(), String> {
-        if value.is_empty()
-            || value.len() > MAX_FIELD_BYTES
-            || value
-                .bytes()
-                .any(|b| b == 0 || b == b'\n' || b == b'\r' || b == b'\t')
-        {
-            return Err(format!("invalid {name}"));
-        }
-        Ok(())
-    }
-    fn pane(value: &str) -> Result<(), String> {
-        field("pane_id", value)?;
-        if !value.starts_with('%') || !value[1..].bytes().all(|b| b.is_ascii_digit()) {
-            return Err("invalid pane_id".into());
-        }
-        Ok(())
-    }
-    fn session(value: &str) -> Result<(), String> {
-        field("session_id", value)?;
-        if !value.starts_with('$') || !value[1..].bytes().all(|b| b.is_ascii_digit()) {
-            return Err("invalid session_id".into());
-        }
-        Ok(())
-    }
     match request {
         Request::Report {
             tool,
@@ -99,38 +121,17 @@ pub fn validate_request(request: &Request) -> Result<(), String> {
             session_id,
             session_name,
             ..
-        } => {
-            field("tool", tool)?;
-            pane(pane_id)?;
-            field("process_generation", process_generation)?;
-            session(session_id)?;
-            field("session_name", session_name)?;
-        }
+        } => validate_report(tool, pane_id, process_generation, session_id, session_name),
         Request::Seen { pane_id } => {
-            if pane_id.is_none() {
-                return Err("Seen needs pane_id".into());
-            }
-            if let Some(value) = pane_id {
-                pane(value)?;
-            }
+            let value = pane_id.as_deref().ok_or("Seen needs pane_id")?;
+            validate_identifier("pane_id", value, '%')
         }
         Request::Exited {
             pane_id,
             session_id,
-        } => {
-            if pane_id.is_none() && session_id.is_none() {
-                return Err("Exited needs pane_id or session_id".into());
-            }
-            if let Some(value) = pane_id {
-                pane(value)?;
-            }
-            if let Some(value) = session_id {
-                session(value)?;
-            }
-        }
-        _ => {}
+        } => validate_exit(pane_id.as_deref(), session_id.as_deref()),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn read_bounded(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
@@ -192,57 +193,6 @@ pub fn write_response(stream: &mut UnixStream, response: &Response) -> io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn rejects_bad_pane() {
-        let r = Request::Seen {
-            pane_id: Some("1".into()),
-        };
-        assert!(validate_request(&r).is_err());
-    }
-    #[test]
-    fn rejects_empty_identity() {
-        let r = Request::Report {
-            tool: "pi".into(),
-            pane_id: "%1".into(),
-            process_generation: "".into(),
-            sequence: 1,
-            state: AgentState::Idle,
-            session_id: "$1".into(),
-            session_name: "work".into(),
-        };
-        assert!(validate_request(&r).is_err());
-    }
 
-    #[test]
-    fn rejects_oversized_and_delimited_identity_fields() {
-        let oversized = Request::Report {
-            tool: "pi".into(),
-            pane_id: "%1".into(),
-            process_generation: "x".repeat(MAX_FIELD_BYTES + 1),
-            sequence: 1,
-            state: AgentState::Idle,
-            session_id: "$1".into(),
-            session_name: "work".into(),
-        };
-        assert!(validate_request(&oversized).is_err());
-        let delimited = Request::Report {
-            tool: "pi".into(),
-            pane_id: "%1".into(),
-            process_generation: "bad\tname".into(),
-            sequence: 1,
-            state: AgentState::Idle,
-            session_id: "$1".into(),
-            session_name: "work".into(),
-        };
-        assert!(validate_request(&delimited).is_err());
-    }
-
-    #[test]
-    fn rejects_invalid_session_id() {
-        let request = Request::Exited {
-            pane_id: None,
-            session_id: Some("agent-one".into()),
-        };
-        assert!(validate_request(&request).is_err());
-    }
+    include!("protocol/tests.rs");
 }

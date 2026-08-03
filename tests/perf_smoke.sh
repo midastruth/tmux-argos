@@ -5,17 +5,10 @@
 # are stable enough to catch large regressions without a live tmux server.
 # Run with: bash tests/perf_smoke.sh
 #
-# Tunables (environment):
-#   PERF_ITERATIONS      measured runs per case (default 7)
-#   PERF_WARMUP          discarded warm-up runs per case (default 2)
-#   PERF_MAX_PICKER_MS   absolute median threshold for picker.sh (default 500;
-#                        0 disables)
-#   PERF_MAX_GROWTH      max allowed median growth when n doubles 50->100
-#                        (default 3.5; linear ~2x, quadratic ~4x; 0 disables)
-#
-# Medians (not means) are compared against thresholds so a single slow run on a
-# noisy CI machine does not fail the build. The growth check is machine-speed
-# independent and exists to catch algorithmic (per-item cost) regressions.
+# The human-owned thresholds are intentionally not configurable by environment:
+# 20 measured runs, p95 <= 200ms, and p95 growth <= 2.5x from 50 to 100 items.
+# A noisy machine must be fixed or explicitly change the constitutional test;
+# callers cannot silently disable the gate.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -85,7 +78,7 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
 }
 
-# measure <label> <command> -> sets PERF_MEDIAN_MS; prints a summary line.
+# measure <label> <command> -> sets PERF_P95_MS; prints a summary line.
 # Runs PERF_WARMUP discarded warm-up iterations (page cache, bash parse) then
 # PERF_ITERATIONS measured ones, reporting min/median/max.
 measure() {
@@ -107,13 +100,15 @@ measure() {
   while IFS= read -r line; do sorted+=("$line"); done \
     < <(printf '%s\n' "${samples[@]}" | sort -n)
   local median_ns="${sorted[$((iterations / 2))]}"
+  local p95_index=$((((iterations * 95 + 99) / 100) - 1))
+  local p95_ns="${sorted[$p95_index]}"
   local min_ns="${sorted[0]}"
   local max_ns="${sorted[$((iterations - 1))]}"
 
-  PERF_MEDIAN_MS="$(ms_from_ns "$median_ns")"
-  printf '%-24s %2s+%s runs  min=%8sms  median=%8sms  max=%8sms\n' \
-    "$label" "$warmup" "$iterations" \
-    "$(ms_from_ns "$min_ns")" "$PERF_MEDIAN_MS" "$(ms_from_ns "$max_ns")"
+  PERF_P95_MS="$(ms_from_ns "$p95_ns")"
+  printf '%-24s %2s+%s runs  min=%8sms  median=%8sms  p95=%8sms  max=%8sms\n' \
+    "$label" "$warmup" "$iterations" "$(ms_from_ns "$min_ns")" \
+    "$(ms_from_ns "$median_ns")" "$PERF_P95_MS" "$(ms_from_ns "$max_ns")"
 }
 
 build_case() {
@@ -156,19 +151,17 @@ build_case() {
 }
 
 check_threshold() {
-  local label="$1" median="$2" max="$3"
-  [ "$max" = 0 ] && return 0
-  awk -v m="$median" -v max="$max" 'BEGIN { exit !(m <= max) }' ||
-    fail "$label median ${median}ms exceeded threshold ${max}ms"
+  local label="$1" p95="$2" max="$3"
+  awk -v measured="$p95" -v max="$max" 'BEGIN { exit !(measured <= max) }' ||
+    fail "$label p95 ${p95}ms exceeded threshold ${max}ms"
 }
 
-# check_growth <label> <median at n=50> <median at n=100>
+# check_growth <label> <p95 at n=50> <p95 at n=100>
 # Machine-independent scaling check: when the input doubles, the median must
 # not grow by more than PERF_MAX_GROWTH. Linear scaling gives <= ~2x (fixed
 # startup cost pulls it below 2); quadratic gives ~4x.
 check_growth() {
   local label="$1" small="$2" big="$3"
-  [ "$max_growth" = 0 ] && return 0
   awk -v s="$small" -v b="$big" -v g="$max_growth" \
     'BEGIN { exit !(s <= 0 || b <= s * g) }' || {
     local ratio
@@ -177,27 +170,27 @@ check_growth() {
   }
 }
 
-iterations="${PERF_ITERATIONS:-7}"
-warmup="${PERF_WARMUP:-2}"
-max_picker_ms="${PERF_MAX_PICKER_MS:-500}"
-max_growth="${PERF_MAX_GROWTH:-3.5}"
+iterations=20
+warmup=3
+max_picker_ms=200
+max_growth=2.5
 
 printf 'Smoke performance test (mock tmux, %s warmup + %s measured runs/case)\n' "$warmup" "$iterations"
-printf 'Thresholds: picker median<=%sms, 50->100 growth<=%sx (0 disables)\n\n' \
+printf 'Thresholds: picker p95<=%sms, 50->100 p95 growth<=%sx\n\n' \
   "$max_picker_ms" "$max_growth"
 
-declare -A medians=()
+declare -A p95_measurements=()
 
 for n in 10 50 100; do
   printf 'case: %s managed sessions + %s manual panes\n' "$n" "$n"
   build_case "$n"
   measure "picker.sh --list n=$n" 'scripts/picker.sh --list'
-  medians["picker|$n"]="$PERF_MEDIAN_MS"
-  check_threshold "picker.sh --list n=$n" "$PERF_MEDIAN_MS" "$max_picker_ms"
+  p95_measurements["picker|$n"]="$PERF_P95_MS"
+  check_threshold "picker.sh --list n=$n" "$PERF_P95_MS" "$max_picker_ms"
   printf '\n'
 done
 
-check_growth 'picker.sh --list' "${medians[picker|50]}" "${medians[picker|100]}"
+check_growth 'picker.sh --list' "${p95_measurements[picker|50]}" "${p95_measurements[picker|100]}"
 
 if [ "$FAILURES" -gt 0 ]; then
   printf 'not ok - performance smoke test: %s check(s) failed\n' "$FAILURES" >&2

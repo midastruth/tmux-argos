@@ -180,69 +180,41 @@ process_table_snapshot() {
 # agent. When the foreground command itself is not a known agent, walk the
 # descendants of <pane-pid> and return the first child whose comm matches the
 # detect list. This makes codex discoverable while keeping bare commands fast.
-resolve_pane_agent() {
-  local cmd="$1" pid="$2" table out detects
-  # Claude Code may expose its executable name as claude.exe even on macOS.
-  # Treat it as the configured logical `claude` tool.
-  if [ "$cmd" = claude.exe ] && is_detected_command claude; then
+resolve_direct_agent() {
+  local command_name="$1"
+  if [ "$command_name" = claude.exe ] && is_detected_command claude; then
     printf '%s' claude
     return 0
   fi
-  if is_detected_command "$cmd"; then
-    printf '%s' "$cmd"
+  is_detected_command "$command_name" || return 1
+  printf '%s' "$command_name"
+}
+
+agent_process_table() {
+  local process_table="${AGENT_PS_TABLE:-}"
+  if [ -z "$process_table" ] && [ "${AGENT_PS_TABLE_READY:-}" != 1 ]; then
+    process_table="$(process_table_snapshot 2>/dev/null)" || return 1
+  fi
+  [ -n "$process_table" ] || return 1
+  printf '%s' "$process_table"
+}
+
+resolve_pane_agent() {
+  local command_name="$1" pane_pid="$2" process_table detected_commands resolved_agent
+  resolved_agent="$(resolve_direct_agent "$command_name")" && {
+    printf '%s' "$resolved_agent"
     return 0
-  fi
-  [ -n "$pid" ] || return 1
-  # Only known wrappers get a process-subtree scan. Walking every non-agent pane
-  # is expensive in large tmux workspaces and picker discovery is latency-sensitive.
-  is_wrapper_command "$cmd" || return 1
-
-  table="${AGENT_PS_TABLE:-}"
-  if [ -z "$table" ] && [ "${AGENT_PS_TABLE_READY:-}" != 1 ]; then
-    table="$(process_table_snapshot 2>/dev/null)" || return 1
-  fi
-  [ -n "$table" ] || return 1
-
-  # Build parent->children and pid->comm indexes in awk, then do one BFS. This
-  # avoids the old O(subtree * process-table) bash loop and lets picker.sh reuse
-  # one ps snapshot for every wrapper pane.
-  if [ -n "${AGENT_DETECT_COMMANDS:-}" ]; then
-    detects="$AGENT_DETECT_COMMANDS"
-  else
-    detects="$(detect_commands)"
-  fi
-  out="$({
-    printf '%s\n' "$table"
-  } | awk -v root="$pid" -v detects="$detects" '
-    BEGIN {
-      n = split(detects, d, /[[:space:]]+/)
-      for (i = 1; i <= n; i++) if (d[i] != "") wanted[d[i]] = 1
-    }
-    NF >= 3 {
-      pid = $1; ppid = $2; comm = $3
-      sub(/^.*\//, "", comm)
-      cmd[pid] = comm
-      children[ppid] = children[ppid] " " pid
-    }
-    END {
-      if (cmd[root] in wanted) { print cmd[root]; exit 0 }
-      head = tail = 1; q[1] = root; seen[root] = 1
-      while (head <= tail) {
-        cur = q[head++]
-        k = split(children[cur], kids, " ")
-        for (i = 1; i <= k; i++) {
-          child = kids[i]
-          if (child == "" || seen[child] || child == cur) continue
-          seen[child] = 1
-          if (cmd[child] in wanted) { print cmd[child]; exit 0 }
-          q[++tail] = child
-        }
-      }
-      exit 1
-    }
-  ')" || return 1
-  [ -n "$out" ] || return 1
-  printf '%s' "$out"
+  }
+  [ -n "$pane_pid" ] || return 1
+  is_wrapper_command "$command_name" || return 1
+  process_table="$(agent_process_table)" || return 1
+  detected_commands="${AGENT_DETECT_COMMANDS:-}"
+  [ -n "$detected_commands" ] || detected_commands="$(detect_commands)"
+  resolved_agent="$(printf '%s\n' "$process_table" |
+    awk -v root="$pane_pid" -v detects="$detected_commands" \
+      -f "$STATUS_HELPERS_DIR/lib/resolve_pane_agent.awk")" || return 1
+  [ -n "$resolved_agent" ] || return 1
+  printf '%s' "$resolved_agent"
 }
 
 # agents_config

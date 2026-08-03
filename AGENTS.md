@@ -23,36 +23,45 @@
 
 - 新功能应直接替换旧设计，不要并行维护 legacy 路径。
 - 配置项、状态值或命令行为发生变化时，同步更新 `README.md`。
-- 行为变更必须添加或更新测试，测试名称应明确描述场景和预期结果。
+- 行为变更必须先由人添加或批准能够失败的测试，测试名称应明确描述场景和预期结果；agent 只修改生产代码使其通过。
 - 修复问题时优先解决根因，不使用静默吞错、无边界重试或仅针对单个样例的补丁。
 - 除非任务明确要求，否则不要引入新的运行时依赖或测试框架。
 
 ## 项目结构
 
 - `tmux-argos.tmux`：插件入口和 tmux 配置初始化。
-- `scripts/`：启动、选择器、状态管理及共享 Bash 逻辑。
-- `daemon/`：Pi、Codex、Claude 屏幕状态检测、状态缓存及历史读取。
-- `tests/run.sh`：主要 Bash 测试套件。
-- `tests/perf_smoke.sh`：性能冒烟测试。
+- `scripts/`：启动、状态管理与共享 Bash 逻辑；选择器按 common/rows/actions 分层，`scripts/lib/` 保存独立 AWK 程序。
+- `daemon/`：Pi、Codex、Claude 屏幕状态检测、状态缓存及历史读取，按事件、扫描、输出、检测和 I/O 职责拆分。
+- `spec/`：Gherkin 已知需求及其可执行验收测试映射。
+- `tests/run.sh`：主要 Bash 行为与回归测试套件。
+- `tests/quality_metrics.py`：文件、函数、复杂度与重复率硬门禁。
+- `tests/perf_smoke.sh`、`tests/system.sh`、`tests/mutation.sh`、`tests/security.sh`、`tests/flaky.sh`：深层证伪器。
+
+## 测试宪法区
+
+- `tests/**`、`spec/**`、`daemon/fixtures/**`、`.github/workflows/**`、`.github/CODEOWNERS`、`.pi/extensions/test-constitution.ts` 和本文件属于人维护的宪法区。
+- agent 可以读取和执行宪法区，但不得编辑、覆盖、删除、移动、跳过或放宽其中的测试、契约、阈值与 CI 裁决。
+- 如果需求必须改变可执行规范，停止实现并请人先提供或明确批准对应的宪法区补丁。测试失败时修复生产代码，不修改反驳装置。
+- 不使用环境变量、命令行选项、`skip`、忽略规则或局部替代命令绕过失败门禁。
 
 ## 验证
 
-完成代码修改后，至少运行：
+完成代码修改后，至少运行完整快速门禁：
 
 ```bash
-bash tests/run.sh
+bash tests/verify.sh
 ```
 
-涉及选择器、进程扫描、状态统计或性能敏感路径时，再运行：
+它统一执行行为测试、架构契约、严格质量门禁、ShellCheck、Rust 格式/Clippy，以及证伪器的元测试，并执行 30 秒反馈预算。
+
+涉及对应边界时运行深层门禁：
 
 ```bash
 bash tests/perf_smoke.sh
+bash tests/system.sh
+bash tests/mutation.sh
+bash tests/security.sh
+bash tests/flaky.sh
 ```
 
-如果环境中安装了 ShellCheck，修改 Bash 文件后运行：
-
-```bash
-shellcheck tmux-argos.tmux scripts/*.sh tests/*.sh
-```
-
-提交结果前确认测试通过，并检查文档、实现和测试描述保持一致。
+提交结果前确认适用门禁通过，并检查文档、实现和测试描述保持一致。测试通过只表示暂未找到反例，不表示实现已被证明正确。

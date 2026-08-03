@@ -115,65 +115,65 @@ mouse_row_to_index() {
   printf '%s' "$idx"
 }
 
+choose_agent() {
+  local selected_index="$1"
+  printf '%s' "${names[$selected_index]}" >"$select_out"
+  exit 0
+}
+
+handle_mouse_selection() {
+  local count="$1" payload='' final='' character button coordinates row selected_index
+  while IFS= read -rsn1 -t 0.1 character; do
+    case "$character" in
+    M|m) final="$character"; break ;;
+    *) payload="$payload$character" ;;
+    esac
+  done
+  button="${payload%%;*}"
+  coordinates="${payload#*;}"
+  row="${coordinates#*;}"
+  [ "$button" = '0' ] || return 0
+  [ "$final" = 'M' ] || return 0
+  selected_index="$(mouse_row_to_index "$row" "$count")" || return 0
+  choose_agent "$selected_index"
+}
+
+handle_escape_sequence() {
+  local count="$1" intro kind
+  IFS= read -rsn1 -t 0.03 intro || exit 0
+  [ "$intro" = '[' ] || exit 0
+  IFS= read -rsn1 -t 0.03 kind || exit 0
+  case "$kind" in
+  A) selected=$(((selected + count - 1) % count)) ;;
+  B) selected=$(((selected + 1) % count)) ;;
+  '<') handle_mouse_selection "$count" ;;
+  esac
+}
+
+handle_menu_key() {
+  local key="$1" count="$2" selected_index
+  case "$key" in
+  $'\x0e') selected=$(((selected + 1) % count)) ;;
+  $'\x10') selected=$(((selected + count - 1) % count)) ;;
+  ''|$'\r'|$'\n') choose_agent "$selected" ;;
+  q|Q) exit 0 ;;
+  $'\x1b') handle_escape_sequence "$count" ;;
+  [1-9])
+    selected_index=$((key - 1))
+    [ "$selected_index" -lt "$count" ] && choose_agent "$selected_index"
+    ;;
+  esac
+}
+
 select_agent() {
-  local selected=0 count key rest idx
-  local intro kind mouse final ch button row
+  local selected=0 count key
   count=${#names[@]}
   [ "$count" -gt 0 ] || exit 0
   [ -n "$select_out" ] || exit 0
-
   while :; do
     render_menu "$selected"
     IFS= read -rsn1 key || exit 0
-    case "$key" in
-    $'\x0e') selected=$(((selected + 1) % count)) ;;         # Ctrl+n
-    $'\x10') selected=$(((selected + count - 1) % count)) ;; # Ctrl+p
-    ''|$'\r'|$'\n') # Empty: terminal ICRNL turned Enter's \r into \n, read's
-                    # delimiter, so read returns success with an empty key.
-      printf '%s' "${names[$selected]}" >"$select_out"; exit 0 ;;
-    q|Q) exit 0 ;;
-    $'\x1b')
-      # Escape sequences carry arrow keys and SGR mouse reports; a bare Esc
-      # (no following bytes) cancels. Read the intro byte by byte so a mouse
-      # report of arbitrary length is consumed fully instead of leaking bytes
-      # into the next read and corrupting the menu.
-      IFS= read -rsn1 -t 0.03 intro || exit 0
-      [ "$intro" = '[' ] || exit 0
-      IFS= read -rsn1 -t 0.03 kind || exit 0
-      case "$kind" in
-      A) selected=$(((selected + count - 1) % count)) ;; # Up
-      B) selected=$(((selected + 1) % count)) ;;         # Down
-      '<')
-        # SGR mouse report: ESC [ < button ; col ; row (M=press | m=release).
-        # Accumulate the numeric payload until the terminating M/m.
-        mouse=''
-        final=''
-        while IFS= read -rsn1 -t 0.1 ch; do
-          case "$ch" in
-          M|m) final="$ch"; break ;;
-          *) mouse="$mouse$ch" ;;
-          esac
-        done
-        button="${mouse%%;*}"
-        rest="${mouse#*;}"
-        row="${rest#*;}"
-        # Left-button press on an entry row selects and launches it.
-        if [ "$button" = '0' ] && [ "$final" = 'M' ] &&
-          idx=$(mouse_row_to_index "$row" "$count"); then
-          printf '%s' "${names[$idx]}" >"$select_out"
-          exit 0
-        fi
-        ;;
-      esac
-      ;;
-    [1-9])
-      idx=$((key - 1))
-      if [ "$idx" -ge 0 ] && [ "$idx" -lt "$count" ]; then
-        printf '%s' "${names[$idx]}" >"$select_out"
-        exit 0
-      fi
-      ;;
-    esac
+    handle_menu_key "$key" "$count"
   done
 }
 

@@ -5,31 +5,90 @@ on:
   pull_request:
 
 jobs:
-  shell-and-smoke:
+  constitutional-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install shellcheck
+      - name: Install ShellCheck
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: Shellcheck
-        run: shellcheck -x -P scripts tmux-argos.tmux scripts/*.sh tests/*.sh tests/lib/*.sh
+      - name: Run behavior, architecture, quality, and meta-test gates
+        run: bash tests/verify.sh
 
-      - name: Rust format, lint, and tests
+      - name: Build release binaries
+        run: cargo build --release --manifest-path daemon/Cargo.toml
+
+  system-gate:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    needs: constitutional-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tmux on Linux
+        if: runner.os == 'Linux'
         run: |
-          cargo fmt --manifest-path daemon/Cargo.toml -- --check
-          cargo check --manifest-path daemon/Cargo.toml
-          cargo test --manifest-path daemon/Cargo.toml
-          cargo clippy --manifest-path daemon/Cargo.toml --all-targets -- -D warnings
-          cargo build --release --manifest-path daemon/Cargo.toml
+          sudo apt-get update
+          sudo apt-get install -y tmux
 
-      - name: Bash unit tests
-        run: bash tests/run.sh
+      - name: Install tmux on macOS
+        if: runner.os == 'macOS'
+        run: brew install tmux
 
-      - name: Smoke performance tests
-        env:
-          PERF_MAX_PICKER_MS: 10000
+      - name: Run real tmux E2E, concurrency, memory, and chaos falsifiers
+        run: bash tests/system.sh
+
+  mutation-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: constitutional-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned mutation tester
+        run: cargo install cargo-mutants --version 27.1.0 --locked
+
+      - name: Prove critical state and protocol tests kill every viable mutant
+        run: bash tests/mutation.sh
+
+  security-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: constitutional-gate
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned RustSec scanner
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Reject advisories and committed secret signatures
+        run: bash tests/security.sh
+
+  stability-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: constitutional-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run every behavior test twenty consecutive times
+        run: bash tests/flaky.sh
+
+  performance-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: constitutional-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run strict p95 performance falsifier
         run: bash tests/perf_smoke.sh

@@ -450,32 +450,61 @@ Many thanks to [Takuya Matsuyama (craftzdog)](https://github.com/craftzdog) for 
 
 ## Development
 
-Build and test the Rust daemon, then run the Bash integration suite:
+Tests are treated as executable falsifiers: a failure rejects the current code
+hypothesis, while a pass means only that no covered counterexample was found.
+Run the complete fast constitutional gate with:
 
 ```sh
-cargo test --manifest-path daemon/Cargo.toml
-bash tests/run.sh
+bash tests/verify.sh
 ```
 
-Run the picker discovery smoke performance check with:
+The executable evidence is divided by the kind of claim it tries to refute:
+
+- **Known requirements:** Rust/Bash behavior tests plus Gherkin scenarios in
+  `spec/features/`. `tests/gherkin_contract.py` requires every scenario to map
+  to an executable acceptance test.
+- **Unknown counterexamples:** generated identifier properties cover 10,000
+  cases and deterministic protocol fuzzing mutates 100,000 payloads.
+- **Tests of the tests:** `tests/meta.sh` seeds architecture, size, complexity,
+  and duplication faults; `tests/mutation.sh` requires every viable critical
+  state/protocol mutant to be killed.
+- **Composition and environment:** `tests/system.sh` exercises a real isolated
+  tmux server, 100 concurrent clients, 20 daemon restart cycles, and 16/32MiB
+  idle/pressure RSS budgets on Linux and macOS.
+- **Regression:** named regression tests preserve every security and lifecycle
+  counterexample already found; screen heuristics use stable fixture strings.
+
+The fast gate is deliberately strict: files are limited to 400 lines, functions
+to 60 lines, cyclomatic complexity to 10, Rust cognitive complexity to 15, and
+8-line duplicate windows to 1%. ShellCheck and Clippy allow zero warnings. The
+whole fast feedback loop must complete within 30 seconds.
+
+Additional gates are run separately and by CI:
 
 ```sh
-bash tests/perf_smoke.sh
+bash tests/perf_smoke.sh  # 100+100 item p95 <=200ms; growth <=2.5x
+bash tests/system.sh      # real tmux E2E, concurrency, memory, chaos
+bash tests/mutation.sh    # requires cargo-mutants 27.1.0
+bash tests/security.sh    # requires cargo-audit 0.22.2
+bash tests/flaky.sh       # twenty consecutive Rust and Bash runs
 ```
 
-The performance smoke test simulates 10/50/100 managed sessions plus manual
-agent panes using a local fake `tmux` binary. Daemon state-loop behavior is
-covered by Rust tests and the status line itself forks zero processes. Tune or
-disable the threshold with:
+Performance thresholds and repetition counts are part of the human-owned
+constitution and cannot be disabled or raised through environment variables.
 
-```sh
-PERF_ITERATIONS=10 PERF_MAX_PICKER_MS=750 bash tests/perf_smoke.sh
-PERF_MAX_PICKER_MS=0 bash tests/perf_smoke.sh
-```
+### Human-owned executable specification
 
-The picker median defaults to a 500ms ceiling; set `PERF_MAX_PICKER_MS` to tune
-it for slower machines. The tests use a local fake `tmux` binary, so they do not
-require a running tmux server or external test framework. CI also runs
-`shellcheck` over the plugin scripts and entrypoints.
+`tests/**`, `spec/**`, CI workflows, `CODEOWNERS`, `AGENTS.md`, and the Pi protection
+extension are the constitutional boundary. Implementation agents may read and
+run them but must not change or weaken them without explicit human approval.
+`.pi/extensions/test-constitution.ts` intercepts normal Pi `write`/`edit` calls
+and common shell mutation paths, then shows a default-reject choice between
+rejecting the operation and allowing that single mutation. Cancellation or a
+run mode without interactive UI blocks the operation. Approval is never
+remembered, so every protected tool call requires a new human decision. This
+local hook is defense in depth, not a security boundary: enable GitHub branch
+protection, require every CI gate, and require CODEOWNER review
+for the final external decision. A human must approve changes to the executable
+specification when intended behavior changes.
 
 

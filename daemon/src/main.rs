@@ -250,43 +250,53 @@ fn spawn_acceptor(listener: UnixListener, sender: SyncSender<Incoming>) {
     });
 }
 
-fn event_loop(receiver: &Receiver<Incoming>, center: &mut StateCenter, server_pid: i32) {
-    let mut shutdown = false;
-    let mut server_check_deadline = Instant::now() + SERVER_LIVENESS_INTERVAL;
-    while !shutdown {
-        let now = Instant::now();
-        if now >= server_check_deadline {
-            if !process_is_alive(server_pid) {
-                break;
-            }
-            server_check_deadline = now + SERVER_LIVENESS_INTERVAL;
+fn reconcile_center(center: &mut StateCenter) {
+    let now = Instant::now();
+    center.process_deadlines(now);
+    center.reconcile(now);
+}
+
+fn server_remains_alive(server_pid: i32, deadline: &mut Instant) -> bool {
+    let now = Instant::now();
+    if now < *deadline {
+        return true;
+    }
+    *deadline = now + SERVER_LIVENESS_INTERVAL;
+    process_is_alive(server_pid)
+}
+
+fn drain_event_batch(receiver: &Receiver<Incoming>, center: &mut StateCenter) -> bool {
+    for index in 1..EVENT_BATCH_LIMIT {
+        if index % DEADLINE_CHECK_STRIDE == 0 {
+            reconcile_center(center);
         }
-        center.process_deadlines(now);
-        center.reconcile(now);
+        let Ok(incoming) = receiver.try_recv() else {
+            break;
+        };
+        if handle(incoming, center) {
+            return true;
+        }
+    }
+    false
+}
+
+fn event_loop(receiver: &Receiver<Incoming>, center: &mut StateCenter, server_pid: i32) {
+    let mut server_check_deadline = Instant::now() + SERVER_LIVENESS_INTERVAL;
+    loop {
+        if !server_remains_alive(server_pid, &mut server_check_deadline) {
+            break;
+        }
+        reconcile_center(center);
         let timeout = center
             .next_wait(Instant::now())
             .min(server_check_deadline.saturating_duration_since(Instant::now()));
         match receiver.recv_timeout(timeout) {
             Ok(incoming) => {
-                shutdown = handle(incoming, center);
-                for index in 1..EVENT_BATCH_LIMIT {
-                    if index % DEADLINE_CHECK_STRIDE == 0 {
-                        let now = Instant::now();
-                        center.process_deadlines(now);
-                        center.reconcile(now);
-                    }
-                    match receiver.try_recv() {
-                        Ok(incoming) => {
-                            if handle(incoming, center) {
-                                shutdown = true;
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
+                let shutdown = handle(incoming, center) || drain_event_batch(receiver, center);
+                reconcile_center(center);
+                if shutdown {
+                    break;
                 }
-                center.process_deadlines(Instant::now());
-                center.reconcile(Instant::now());
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
