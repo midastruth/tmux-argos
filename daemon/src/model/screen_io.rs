@@ -126,8 +126,8 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
 }
 
 fn capture_pane(server_socket: &str, pane_id: &str) -> Option<String> {
-    // Detection must inspect the live bottom screen, not scrollback. Otherwise
-    // Pi's old `Working...` line can keep a completed turn marked as working.
+    // Detection must inspect the live bottom screen, not stale status text in
+    // scrollback from an already completed turn.
     tmux_output(server_socket, &["capture-pane", "-p", "-J", "-t", pane_id])
 }
 

@@ -30,9 +30,20 @@
     }
 
     #[test]
-    fn pi_screen_detects_working_literal_and_idle_fallback() {
-        let golden = include_str!("../../fixtures/golden/pi-working.txt");
-        assert_eq!(detect_pi(golden).state, AgentState::Working);
+    fn pi_detects_only_structural_working_status_at_the_bottom() {
+        let legacy = include_str!("../../fixtures/golden/pi-working.txt");
+        assert_eq!(detect_pi(legacy).state, AgentState::Idle);
+        assert_eq!(
+            detect_pi(
+                "answer text\n\n── ⠧ Working ─────────\n────────────────────\nproject footer\nmodel footer"
+            )
+            .state,
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_pi("The user wrote: ⠧ Working\nthis is conversation text\nready").state,
+            AgentState::Idle
+        );
         assert_eq!(detect_pi("tokens 1.2k  working...").state, AgentState::Idle);
         assert_eq!(detect_pi("Ready for input").state, AgentState::Idle);
     }
@@ -54,9 +65,27 @@
     }
 
     #[test]
-    fn codex_screen_detects_blocker_after_prompt() {
+    fn codex_screen_detects_blocker_and_live_working_footer() {
         let golden = include_str!("../../fixtures/golden/codex-blocked.txt");
         assert_eq!(detect_codex("", golden).state, AgentState::Blocked);
+        assert_eq!(
+            detect_codex("", "response\n\n• Working (12s • esc to interrupt)\n").state,
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_codex("", "response\n\n■ Conversation interrupted\n• Working (12s • esc to interrupt)\n").state,
+            AgentState::Idle
+        );
+    }
+
+    #[test]
+    fn codex_viewer_preserves_state_and_startup_prompts_block() {
+        let viewer = "› prompt\n↑/↓ to scroll\npgup/pgdn to move\nhome/end to jump\nq to quit\nesc to edit prev";
+        assert!(detect_codex("", viewer).skip_state_update);
+        let trust = "> You are in /tmp/project\nDo you trust the contents of this directory?";
+        assert_eq!(detect_codex("", trust).state, AgentState::Blocked);
+        let update = "Update available!\nUpdate now\nSkip until next version\nPress enter to continue";
+        assert_eq!(detect_codex("", update).state, AgentState::Blocked);
     }
 
     #[test]
@@ -68,9 +97,49 @@
     }
 
     #[test]
+    fn claude_detects_current_working_signals() {
+        assert_eq!(detect_claude("◐ thinking", "").state, AgentState::Working);
+        assert_eq!(
+            detect_claude("", "response\n⏵ compiling · esc to interrupt\n").state,
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_claude("", "✻ Waiting for 2 background agents to finish\n────────\n❯\n────────\n").state,
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_claude("", "old transcript: ✻ Waiting for 2 background agents to finish\nready").state,
+            AgentState::Idle
+        );
+        assert_eq!(
+            detect_claude("", "✽ Checking services · 3 MCP tasks still running\n").state,
+            AgentState::Working
+        );
+        assert_eq!(
+            detect_claude("", "/btw investigate this\nEsc to close\n").state,
+            AgentState::Working
+        );
+    }
+
+    #[test]
     fn claude_permission_detects_blocked() {
         let golden = include_str!("../../fixtures/golden/claude-blocked.txt");
         assert_eq!(detect_claude("", golden).state, AgentState::Blocked);
+        let mcp = "MCP server “docs” requests your input\n❯ Accept\n  Decline\nEsc to cancel";
+        assert_eq!(detect_claude("", mcp).state, AgentState::Blocked);
+        let confirmation = "────────\nApply proposed changes?\nEnter to confirm\nEsc to cancel";
+        assert_eq!(
+            detect_claude("", confirmation).state,
+            AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn claude_viewers_preserve_the_previous_state() {
+        let transcript = "Showing detailed transcript\nCtrl+O to toggle\n↑↓ scroll";
+        assert!(detect_claude("", transcript).skip_state_update);
+        let picker = "Select model\nEnter to set as default\nEsc to cancel";
+        assert!(detect_claude("", picker).skip_state_update);
     }
 
     #[test]

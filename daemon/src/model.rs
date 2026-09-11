@@ -277,6 +277,7 @@ include!("model/state_scan.rs");
 include!("model/state_output.rs");
 include!("model/screen_io.rs");
 include!("model/screen_detection.rs");
+include!("model/screen_detection_tools.rs");
 
 #[cfg(test)]
 mod tests {

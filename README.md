@@ -230,17 +230,22 @@ For each dirty candidate pane the daemon reads:
 - `#{pane_title}` for OSC title signals.
 - `tmux capture-pane -p -J` for the live bottom screen without scrollback.
 
-Following Herdr's Pi screen manifest, the exact visible literal `Working...` is
-`working`; otherwise Pi is `idle`. Pi currently has no high-confidence visible
-`blocked` rule.
+Pi is `working` when the live bottom status region contains its current
+Braille-spinner `Working` status line. Matching is line-structural and
+bottom-bounded so conversation text containing the same words does not create a
+false working state. Otherwise Pi is `idle`; Pi currently has no high-confidence
+visible `blocked` rule.
 
-Codex rules mirror Herdr's high-value signals: `Action Required` in the title is
-`blocked`, a Braille-spinner title is `working`, approval/answer prompts after
-the last `›` prompt are `blocked`, and a non-empty non-spinner title is `idle`.
+Codex is `blocked` for an `Action Required` title, startup trust/update prompts,
+and live approval or answer forms. A Braille-spinner title or bottom
+`Working (... esc to interrupt)` footer is `working`. Transcript viewers preserve
+the previous state, and a non-empty non-spinner title is a visible idle signal.
 
-Claude rules mirror Herdr's screen heuristics: a Braille-spinner title is
-`working`, visible permission/menu prompts are `blocked`, a live `❯` prompt box
-is `idle`, transcript/model-picker views are ignored, and a `✳` title is `idle`.
+Claude recognizes Braille and half-circle title spinners, interruptible live
+turns, `/btw` overlays, background agents, and running MCP tasks as `working`.
+Permission/navigation forms, dynamic workflows, and MCP elicitation are
+`blocked`; a live `❯` prompt box or `✳` title is `idle`. Transcript and model
+picker views preserve the previous state.
 
 Following Herdr, a plain `working` to `idle` transition is confirmed with three
 100ms rechecks, bounded to 700ms, so a transient TUI redraw does not publish a
