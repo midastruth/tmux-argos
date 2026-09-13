@@ -33,9 +33,9 @@
     }
 
     #[test]
-    fn state_exposure_defaults_off_and_validates_modes_and_file_paths() {
+    fn state_exposure_defaults_both_and_validates_modes_and_file_paths() {
         let default = Config::from_values(&HashMap::new()).unwrap();
-        assert_eq!(default.state_exposure, ExposureMode::Off);
+        assert_eq!(default.state_exposure, ExposureMode::Both);
 
         for (text, expected) in [
             ("off", ExposureMode::Off),

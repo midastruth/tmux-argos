@@ -259,8 +259,8 @@ publishes `done` if the pane is not currently visible; opening the pane sends
 
 ### Structured state exposure
 
-Structured exposure is disabled by default. Enable an atomic state file, socket
-inspection, or both:
+Structured exposure defaults to both an atomic state file and socket inspection.
+Choose a single exposure method or disable both when needed:
 
 ```tmux
 set -g @agent_state_exposure 'both' # off, file, socket, or both
@@ -499,7 +499,7 @@ set -g @agent_animation_interval_ms  '1000'
 set -g @agent_screen_interval_ms           '1000'
 set -g @agent_screen_full_scan_interval_ms '30000'
 set -g @agent_state_ttl                    '259200'
-set -g @agent_state_exposure               'off'
+set -g @agent_state_exposure               'both'
 set -g @agent_state_file '~/.cache/tmux-argos/state.json'
 set -g @agent_daemon_binary '/path/to/daemon/target/release/tmux-argos-state-daemon'
 ```

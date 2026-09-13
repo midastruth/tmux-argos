@@ -6,7 +6,7 @@ use std::path::Path;
 fn exposure_config(
     values: &HashMap<String, String>,
 ) -> Result<(ExposureMode, Option<PathBuf>), String> {
-    let mode = match config_value(values, "@agent_state_exposure", "off").as_str() {
+    let mode = match config_value(values, "@agent_state_exposure", "both").as_str() {
         "off" => ExposureMode::Off,
         "file" => ExposureMode::File,
         "socket" => ExposureMode::Socket,
