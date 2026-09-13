@@ -45,9 +45,10 @@ fn run() -> Result<(), String> {
             let response = send_request(&paths.socket, &Request::Ensure)?;
             print_response(response)
         }
-        "snapshot" => {
+        "snapshot" | "inspect" => {
             ensure_daemon(&paths, &server)?;
-            print_response(send_request(&paths.socket, &Request::Snapshot)?)
+            let request = state_read_request(&command);
+            print_response(send_request(&paths.socket, &request)?)
         }
         "snapshot-picker" => {
             ensure_daemon(&paths, &server)?;
@@ -68,6 +69,13 @@ fn run() -> Result<(), String> {
         }
         "shutdown" => print_response(send_request(&paths.socket, &Request::Shutdown)?),
         _ => Err(format!("unknown command: {command}")),
+    }
+}
+
+fn state_read_request(command: &str) -> Request {
+    match command {
+        "inspect" => Request::Inspect,
+        _ => Request::Snapshot,
     }
 }
 
@@ -226,8 +234,9 @@ fn serve(paths: &RuntimePaths, server: &TmuxServerInfo) -> Result<(), String> {
     spawn_acceptor(listener, sender)?;
     let mut center = StateCenter::new(server.socket.clone(), config);
     center.restore_once();
-    center.reconcile(Instant::now());
+    reconcile_center(&mut center);
     event_loop(&receiver, &mut center, server.pid);
+    center.remove_exposure_file();
     let _ = fs::remove_file(&paths.socket);
     Ok(())
 }
@@ -325,17 +334,41 @@ fn process_is_alive(pid: i32) -> bool {
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+fn bounded_response(data: serde_json::Value) -> Response {
+    let response = Response::ok(Some(data));
+    let wire_size = serde_json::to_vec(&response)
+        .map(|bytes| bytes.len() + 1)
+        .unwrap_or(usize::MAX);
+    if wire_size <= protocol::MAX_MESSAGE_BYTES {
+        response
+    } else {
+        Response::error("inspect snapshot exceeds 64 KiB; use file exposure".into())
+    }
+}
+
+fn inspect_response(center: &StateCenter) -> Response {
+    match center.inspect() {
+        Ok(snapshot) => bounded_response(snapshot),
+        Err(error) => Response::error(error),
+    }
+}
+
+fn reload_response(center: &mut StateCenter) -> Response {
+    match Config::load(&center.server_socket) {
+        Ok(config) => {
+            center.replace_config(config);
+            Response::ok(None)
+        }
+        Err(error) => Response::error(error),
+    }
+}
+
 fn handle(mut incoming: Incoming, center: &mut StateCenter) -> bool {
     let (response, shutdown) = match incoming.request {
         Request::Ensure => (Response::ok(None), false),
         Request::Snapshot => (Response::ok(Some(center.snapshot())), false),
-        Request::ReloadConfig => match Config::load(&center.server_socket) {
-            Ok(config) => {
-                center.replace_config(config);
-                (Response::ok(None), false)
-            }
-            Err(error) => (Response::error(error), false),
-        },
+        Request::Inspect => (inspect_response(center), false),
+        Request::ReloadConfig => (reload_response(center), false),
         Request::Shutdown => (Response::ok(None), true),
         request => match center.apply(request) {
             Ok(()) => (Response::ok(None), false),
@@ -349,11 +382,6 @@ fn handle(mut incoming: Incoming, center: &mut StateCenter) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn event_batch_is_bounded_and_checks_deadlines() {
-        assert_eq!(EVENT_BATCH_LIMIT, 64);
-        let deadline_check_stride = DEADLINE_CHECK_STRIDE;
-        assert!(deadline_check_stride > 0);
-        assert!(deadline_check_stride < EVENT_BATCH_LIMIT);
-    }
+
+    include!("main_tests.rs");
 }

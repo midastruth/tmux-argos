@@ -28,6 +28,7 @@ pub enum Request {
     ReloadConfig,
     Shutdown,
     Snapshot,
+    Inspect,
     Ensure,
 }
 

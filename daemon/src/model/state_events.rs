@@ -27,6 +27,10 @@ impl StateCenter {
             last_window_activity: HashMap::new(),
             pending_idle_confirmations: HashMap::new(),
             published_summary: None,
+            pane_rows: Vec::new(),
+            published_exposure_payload: None,
+            published_file_path: None,
+            exposure_publish_error: None,
             capture_marker: format!("--tmux-argos-daemon-split-{nanos:016x}--"),
         }
     }
@@ -91,6 +95,7 @@ impl StateCenter {
     }
 
     pub fn replace_config(&mut self, config: Config) {
+        self.prepare_exposure_config_replacement(&config);
         self.config = config;
         self.frame_index = 0;
         self.animation_deadline = None;

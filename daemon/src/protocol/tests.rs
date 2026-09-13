@@ -1,4 +1,13 @@
     #[test]
+    fn inspect_request_round_trips_as_a_bounded_protocol_message() {
+        let encoded = serde_json::to_vec(&Request::Inspect).unwrap();
+        assert!(encoded.len() < MAX_MESSAGE_BYTES);
+        let decoded: Request = serde_json::from_slice(&encoded).unwrap();
+        assert!(matches!(decoded, Request::Inspect));
+        assert!(validate_request(&decoded).is_ok());
+    }
+
+    #[test]
     fn rejects_bad_pane() {
         let r = Request::Seen {
             pane_id: Some("1".into()),

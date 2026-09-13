@@ -87,40 +87,77 @@ fn tmux_output(server_socket: &str, args: &[&str]) -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+const PANE_FIELD_SEPARATOR: char = '\u{1f}';
+const PANE_RECORD_SEPARATOR: char = '\u{1e}';
+
+fn valid_tmux_id(value: &str, prefix: char) -> bool {
+    value
+        .strip_prefix(prefix)
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|value| value.is_ascii_digit()))
+}
+
+fn parse_pane_flag(value: &str) -> Option<bool> {
+    match value {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
+}
+
+fn parse_pane_record(record: &str) -> Option<PaneRow> {
+    let record = record.strip_prefix('\n').unwrap_or(record);
+    let record = record.strip_prefix('\r').unwrap_or(record);
+    let fields: Vec<&str> = record.split(PANE_FIELD_SEPARATOR).collect();
+    if fields.len() != 16 {
+        return None;
+    }
+    if fields[0].is_empty()
+        || !valid_tmux_id(fields[1], '$')
+        || !valid_tmux_id(fields[3], '@')
+        || !valid_tmux_id(fields[8], '%')
+    {
+        return None;
+    }
+    let session_attached = fields[2].parse::<u32>().ok()? > 0;
+    let window_active = parse_pane_flag(fields[7])?;
+    let pane_active = parse_pane_flag(fields[15])?;
+    Some(PaneRow {
+        session_name: fields[0].into(),
+        session_id: fields[1].into(),
+        session_attached,
+        window_id: fields[3].into(),
+        window_index: fields[4].parse().ok()?,
+        window_name: fields[5].into(),
+        window_activity: fields[6].parse().ok()?,
+        window_active,
+        pane_id: fields[8].into(),
+        pane_index: fields[9].parse().ok()?,
+        command: fields[10].into(),
+        current_path: fields[11].into(),
+        pane_pid: fields[12].parse().ok()?,
+        pane_title: fields[13].into(),
+        configured_tool: fields[14].into(),
+        pane_active,
+        visible: session_attached && window_active && pane_active,
+    })
+}
+
 fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
-    let format = "#{session_name}\t#{session_id}\t#{window_id}\t#{window_activity}\t#{pane_id}\t#{pane_current_command}\t#{pane_pid}\t#{pane_title}\t#{@agent_tool}\t#{session_attached}\t#{window_active}\t#{pane_active}";
+    let format = concat!(
+        "#{s|\x1f| |;s|\x1e| |:session_name}\x1f#{session_id}\x1f",
+        "#{session_attached}\x1f#{window_id}\x1f#{window_index}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:window_name}\x1f#{window_activity}\x1f",
+        "#{window_active}\x1f#{pane_id}\x1f#{pane_index}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:pane_current_command}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:pane_current_path}\x1f#{pane_pid}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:pane_title}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:@agent_tool}\x1f#{pane_active}\x1e"
+    );
     let output = tmux_output(server_socket, &["list-panes", "-a", "-F", format])?;
     Some(
         output
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split('\t');
-                let session_name = fields.next()?.to_string();
-                let session_id = fields.next()?.to_string();
-                let window_id = fields.next()?.to_string();
-                let window_activity = fields.next()?.parse::<u64>().unwrap_or(0);
-                let pane_id = fields.next()?.to_string();
-                let command = fields.next()?.to_string();
-                let pane_pid = fields.next()?.parse::<u32>().ok()?;
-                let pane_title = fields.next().unwrap_or("").to_string();
-                let configured_tool = fields.next().unwrap_or("").to_string();
-                let session_attached = fields.next().unwrap_or("0");
-                let window_active = fields.next().unwrap_or("0");
-                let pane_active = fields.next().unwrap_or("0");
-                let visible = session_attached != "0" && window_active == "1" && pane_active == "1";
-                Some(PaneRow {
-                    session_name,
-                    session_id,
-                    window_id,
-                    window_activity,
-                    pane_id,
-                    command,
-                    pane_pid,
-                    pane_title,
-                    configured_tool,
-                    visible,
-                })
-            })
+            .split(PANE_RECORD_SEPARATOR)
+            .filter_map(parse_pane_record)
             .collect(),
     )
 }

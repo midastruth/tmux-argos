@@ -194,13 +194,20 @@
         let replacement = PaneRow {
             session_name: "agent-reused".into(),
             session_id: "$2".into(),
+            session_attached: false,
             window_id: "@2".into(),
+            window_index: 0,
+            window_name: "agent".into(),
             window_activity: 1,
+            window_active: false,
             pane_id: "%2".into(),
+            pane_index: 0,
             command: "pi".into(),
+            current_path: "/tmp".into(),
             pane_pid: 2,
             pane_title: String::new(),
             configured_tool: "pi".into(),
+            pane_active: false,
             visible: false,
         };
 
@@ -219,13 +226,20 @@
         let moved_pane = PaneRow {
             session_name: "agent-new".into(),
             session_id: "$2".into(),
+            session_attached: false,
             window_id: "@1".into(),
+            window_index: 0,
+            window_name: "agent".into(),
             window_activity: 1,
+            window_active: false,
             pane_id: "%1".into(),
+            pane_index: 0,
             command: "pi".into(),
+            current_path: "/tmp".into(),
             pane_pid: 1,
             pane_title: String::new(),
             configured_tool: "pi".into(),
+            pane_active: false,
             visible: false,
         };
 

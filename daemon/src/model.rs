@@ -1,6 +1,7 @@
 use crate::protocol::{AgentState, Request};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +12,24 @@ const MAX_RETIRED_GENERATIONS: usize = 4096;
 const PENDING_IDLE_RECHECK: Duration = Duration::from_millis(100);
 const PENDING_IDLE_CAP: Duration = Duration::from_millis(700);
 const PENDING_IDLE_CONFIRMATIONS: u8 = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExposureMode {
+    Off,
+    File,
+    Socket,
+    Both,
+}
+
+impl ExposureMode {
+    fn file_enabled(self) -> bool {
+        matches!(self, Self::File | Self::Both)
+    }
+
+    fn socket_enabled(self) -> bool {
+        matches!(self, Self::Socket | Self::Both)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -30,6 +49,8 @@ pub struct Config {
     pub state_ttl: Duration,
     pub detect_commands: HashSet<String>,
     pub wrapper_commands: HashSet<String>,
+    pub state_exposure: ExposureMode,
+    pub state_file: Option<PathBuf>,
 }
 
 fn config_value(values: &HashMap<String, String>, name: &str, default: &str) -> String {
@@ -122,6 +143,7 @@ impl Config {
         let frames = config_frames(values, &working_icon)?;
         let (animation_ms, screen_ms, full_scan_ms) = config_intervals(values)?;
         let ttl = config_u64(values, "@agent_state_ttl", 259200, "state TTL")?;
+        let (state_exposure, state_file) = exposure_config(values)?;
         Ok(Self {
             prefix: config_value(values, "@agent_session_prefix", "agent-"),
             status_enabled: config_value(values, "@agent_status", "on") == "on",
@@ -147,6 +169,8 @@ impl Config {
                 "@agent_detect_wrappers",
                 "node bun npx npm pnpm yarn",
             )),
+            state_exposure,
+            state_file,
         })
     }
 
@@ -169,6 +193,8 @@ impl Config {
             state_ttl: Duration::from_secs(60),
             detect_commands: word_set("pi codex claude"),
             wrapper_commands: word_set("node bun npx npm pnpm yarn"),
+            state_exposure: ExposureMode::Off,
+            state_file: None,
         }
     }
 }
@@ -196,13 +222,20 @@ enum Source {
 struct PaneRow {
     session_name: String,
     session_id: String,
+    session_attached: bool,
     window_id: String,
+    window_index: u32,
+    window_name: String,
     window_activity: u64,
+    window_active: bool,
     pane_id: String,
+    pane_index: u32,
     command: String,
+    current_path: String,
     pane_pid: u32,
     pane_title: String,
     configured_tool: String,
+    pane_active: bool,
     // Captured in the same list-panes call so screen_display_state can decide a
     // finished turn is "done" vs "seen idle" without a per-pane display-message
     // fork on every screen scan.
@@ -269,9 +302,14 @@ pub struct StateCenter {
     last_window_activity: HashMap<String, u64>,
     pending_idle_confirmations: HashMap<String, PendingIdleConfirmation>,
     published_summary: Option<String>,
+    pane_rows: Vec<PaneRow>,
+    published_exposure_payload: Option<String>,
+    published_file_path: Option<PathBuf>,
+    exposure_publish_error: Option<String>,
     capture_marker: String,
 }
 
+include!("model/state_exposure.rs");
 include!("model/state_events.rs");
 include!("model/state_scan.rs");
 include!("model/state_output.rs");
@@ -285,5 +323,6 @@ mod tests {
 
     include!("model/tests_config.rs");
     include!("model/tests_state.rs");
+    include!("model/tests_exposure.rs");
     include!("model/tests_detection.rs");
 }

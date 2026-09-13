@@ -128,6 +128,9 @@ impl StateCenter {
             // 100ms recheck forever.
             return self.retain_resolvable_idle_confirmations(now);
         };
+        if self.config.state_exposure != ExposureMode::Off {
+            self.pane_rows.clone_from(&rows);
+        }
         self.remove_exited_records(&rows, now);
         let full_scan = now >= self.full_screen_scan_deadline;
         if full_scan {
@@ -262,12 +265,10 @@ impl StateCenter {
         } else {
             String::new()
         };
-        if self.published_summary.as_ref() == Some(&summary) {
-            return;
-        }
-        if self.publish(&summary) {
+        if self.published_summary.as_ref() != Some(&summary) && self.publish(&summary) {
             self.published_summary = Some(summary);
         }
+        self.reconcile_exposure();
     }
 
     fn next_expiry(&self, now: Instant) -> Option<Instant> {

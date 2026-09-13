@@ -17,6 +17,9 @@ or swap agents via `@agent_agents`.
 - 🤖 **Multi-agent and multi-instance**: manage pi, codex, and claude side by side; each `prefix` + `y` launch creates a numbered instance such as `pi-1`, `pi-2`, and `pi-3` by default.
 - 🟡 **Live status** per session: `blocked` / `working` / `done` / `idle`
   (Herdr-style Pi/Codex/Claude screen detection; no agent extension required).
+- 🔌 **Structured state exposure**: optionally publish the complete tmux
+  session/window/pane topology and recognized agent state as an atomic JSON file,
+  through the daemon's private Unix socket, or both.
 - 👁️ **Live preview** of each session's screen in the picker.
 - 📜 **Unified history**: press `Tab` in the picker to search saved Pi, Codex,
   and Claude conversations, preview recent messages, and resume one in a managed popup.
@@ -254,6 +257,96 @@ When Pi/Codex/Claude settles from `working` or `blocked` to `idle`, the daemon
 publishes `done` if the pane is not currently visible; opening the pane sends
 `Seen` and changes `done` to `idle`.
 
+### Structured state exposure
+
+Structured exposure is disabled by default. Enable an atomic state file, socket
+inspection, or both:
+
+```tmux
+set -g @agent_state_exposure 'both' # off, file, socket, or both
+set -g @agent_state_file '~/.cache/tmux-argos/state.json'
+```
+
+File mode is intended for agents and external monitoring processes. The daemon
+writes only when topology or agent state changes, creates a missing destination
+directory with mode `0700`, writes a mode-`0600` temporary file, and atomically
+renames it over the destination. Readers therefore see either the previous
+complete snapshot or the next complete snapshot, never a partially-written
+file. Because replacement changes the inode, filesystem watchers should watch
+the parent directory for the destination filename. Linux can use inotify and
+macOS can use kqueue/FSEvents; periodic readers may simply read the file without
+running any tmux command.
+
+Socket mode uses the daemon's existing private mode-`0600` Unix socket. Read it
+through the client while `TMUX` identifies the desired server:
+
+```sh
+scripts/daemon.sh inspect
+```
+
+The command returns the normal protocol envelope
+`{"ok":true,"data":{...}}`. Socket responses are bounded to 64 KiB; use file
+mode for very large tmux servers. The socket is request/response rather than a
+long-lived subscription: the daemon's regular screen scan is the dominant
+latency, so maintaining push clients would add connection and backpressure
+complexity without making detection faster.
+
+The file itself contains the snapshot directly. It has one denormalized record
+per pane, so every tmux session and window is represented without three separate
+`tmux list-*` subprocesses:
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": 1741000000,
+  "panes": [
+    {
+      "sessionId": "$1",
+      "sessionName": "agent-pi-project-1",
+      "sessionAttached": true,
+      "windowId": "@2",
+      "windowIndex": 0,
+      "windowName": "pi",
+      "windowActive": true,
+      "paneId": "%3",
+      "paneIndex": 0,
+      "panePid": 12345,
+      "paneTitle": "pi",
+      "paneActive": true,
+      "visible": true,
+      "command": "pi",
+      "currentPath": "/home/user/project",
+      "agent": "pi",
+      "activity": "active",
+      "agentState": "working",
+      "changedAt": 1741000000
+    }
+  ]
+}
+```
+
+`activity` is `active` for `working` or `blocked`, and `idle` otherwise.
+`agentState` retains the detailed `blocked`, `working`, `done`, or `idle` state.
+A recognized agent without an authoritative state has a null `agentState`; a
+non-agent pane has null `agent`, `agentState`, and `changedAt`. `paneActive`
+describes tmux selection, while `visible` additionally requires an attached
+session and active window. Updates normally follow
+`@agent_screen_interval_ms`; a plain working-to-idle transition may take up to
+700ms longer for redraw confirmation.
+
+For example, an agent can inspect existing peers at startup (the following
+example uses optional `jq`):
+
+```sh
+jq '.panes[] | select(.agent != null) | {paneId, agent, activity, agentState}' \
+  ~/.cache/tmux-argos/state.json
+```
+
+Disabling file exposure, changing its path, or cleanly shutting down the daemon
+removes the file published by that daemon. Invalid exposure modes, or relative
+file paths in `file`/`both` modes, reject a config reload and leave the previous
+valid configuration active.
+
 ### Placing the status fragments
 
 The plugin does not modify `status-left` or `status-right`. Instead it publishes
@@ -406,6 +499,8 @@ set -g @agent_animation_interval_ms  '1000'
 set -g @agent_screen_interval_ms           '1000'
 set -g @agent_screen_full_scan_interval_ms '30000'
 set -g @agent_state_ttl                    '259200'
+set -g @agent_state_exposure               'off'
+set -g @agent_state_file '~/.cache/tmux-argos/state.json'
 set -g @agent_daemon_binary '/path/to/daemon/target/release/tmux-argos-state-daemon'
 ```
 
@@ -415,6 +510,7 @@ not install a toolchain or build code during tmux startup. Plugin reload sends
 
 ```sh
 scripts/daemon.sh snapshot
+scripts/daemon.sh inspect # requires @agent_state_exposure socket or both
 scripts/daemon.sh reload
 ```
 
@@ -442,7 +538,7 @@ tmux run-shell /path/to/tmux-argos/tmux-argos.tmux
   `tmux-argos-history` binary; history previews are plain conversation text and
   Enter launches the agent's native resume command. This is where process and
   history discovery happen.
-- The **daemon** owns live state, agent screen polling, TTL and animation, and publishes a cache-only zero-fork status segment.
+- The **daemon** owns live state, agent screen polling, TTL and animation, publishes a cache-only zero-fork status segment, and optionally exposes a structured topology/state snapshot without requiring consumers to parse pane screens.
 - Pressing `prefix` + `u` from inside an agent popup first detaches that popup,
   then reopens the picker on the outer tmux client.
 
