@@ -90,6 +90,7 @@ reset_mocks() {
     HISTORY_MOCK_ROWS FZF_MOCK_OUTPUT
   unset TMUX_MOCK_OPTIONS TMUX_MOCK_TARGET_OPTIONS TMUX_MOCK_STATUS_OPTIONS \
     TMUX_MOCK_LIST_SESSIONS TMUX_MOCK_LIST_PANES TMUX_MOCK_LIST_CLIENTS \
+    TMUX_MOCK_CLIENT_CONTEXT \
     TMUX_MOCK_LIST_PANES_PICKER TMUX_MOCK_LIST_PANES_STATUS \
     TMUX_MOCK_HAS_SESSION TMUX_MOCK_EXISTING_SESSIONS TMUX_MOCK_CURRENT_SESSION \
     TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_SESSION_ID TMUX_MOCK_PANE_VISIBLE TMUX_MOCK_SERVER_PID \
@@ -292,6 +293,19 @@ FZF_MOCK_OUTPUT="$injected_row"
 run_bash 'scripts/picker.sh test-client' >/dev/null
 assert_contains 'picker Enter cannot open a session ID injected through metadata' "$(<"$TMUX_LOG")" $'attach-session\t-t\t$31'
 assert_not_contains 'picker Enter ignores an injected metadata session ID' "$(<"$TMUX_LOG")" $'attach-session\t-t\t$99'
+
+reset_mocks
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_LIST_SESSIONS=$'agent-pi\t$31\tidle\t100\t/tmp/project\tpi\tpi\t1'
+TMUX_MOCK_CLIENT_CONTEXT=$'/dev/pts/1|$0|@38|%41'
+FZF_MOCK_OUTPUT="$(run_bash 'PICKER_NOW=100 scripts/picker.sh --list')"
+run_bash 'scripts/picker.sh /dev/pts/1' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'picker opening a managed session records the popup host client' "$log_contents" $'set-option\t-t\t$31\t@agent_popup_host_client\t/dev/pts/1'
+assert_contains 'picker opening a managed session records the popup host topology' "$log_contents" $'@agent_popup_host_session_id\t$0\t;\tset-option\t-t\t$31\t@agent_popup_host_window_id\t@38\t;\tset-option\t-t\t$31\t@agent_popup_host_pane_id\t%41'
+assert_contains 'picker opening a managed session marks the popup active' "$log_contents" $'set-option\t-t\t$31\t@agent_popup_active\ton'
+assert_contains 'closing the managed popup marks its popup preference inactive' "$log_contents" $'set-option\t-u\t-t\t$31\t@agent_popup_active'
+assert_not_contains 'closing the managed popup preserves its popup host preference' "$log_contents" $'set-option\t-u\t-t\t$31\t@agent_popup_host_client'
 
 reset_mocks
 injected_kind="$(printf '%s\n' "$injected_row" | cut -f2)"

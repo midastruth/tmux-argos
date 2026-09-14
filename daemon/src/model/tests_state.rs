@@ -209,6 +209,8 @@
             configured_tool: "pi".into(),
             pane_active: false,
             visible: false,
+            popup_host: None,
+            popup_active: false,
         };
 
         state.remove_exited_records(&[replacement], Instant::now());
@@ -241,6 +243,8 @@
             configured_tool: "pi".into(),
             pane_active: false,
             visible: false,
+            popup_host: None,
+            popup_active: false,
         };
 
         state.remove_exited_records(&[moved_pane], Instant::now());

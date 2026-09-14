@@ -219,6 +219,14 @@ enum Source {
 }
 
 #[derive(Clone, Debug)]
+struct PopupHost {
+    client: String,
+    session_id: String,
+    window_id: String,
+    pane_id: String,
+}
+
+#[derive(Clone, Debug)]
 struct PaneRow {
     session_name: String,
     session_id: String,
@@ -240,6 +248,8 @@ struct PaneRow {
     // finished turn is "done" vs "seen idle" without a per-pane display-message
     // fork on every screen scan.
     visible: bool,
+    popup_host: Option<PopupHost>,
+    popup_active: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

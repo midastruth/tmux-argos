@@ -297,7 +297,7 @@ per pane, so every tmux session and window is represented without three separate
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "generatedAt": 1741000000,
   "panes": [
     {
@@ -314,6 +314,13 @@ per pane, so every tmux session and window is represented without three separate
       "paneTitle": "pi",
       "paneActive": true,
       "visible": true,
+      "popupHost": {
+        "client": "/dev/pts/1",
+        "sessionId": "$0",
+        "windowId": "@8",
+        "paneId": "%12"
+      },
+      "popupActive": true,
       "command": "pi",
       "currentPath": "/home/user/project",
       "agent": "pi",
@@ -330,8 +337,19 @@ per pane, so every tmux session and window is represented without three separate
 A recognized agent without an authoritative state has a null `agentState`; a
 non-agent pane has null `agent`, `agentState`, and `changedAt`. `paneActive`
 describes tmux selection, while `visible` additionally requires an attached
-session and active window. Updates normally follow
-`@agent_screen_interval_ms`; a plain working-to-idle transition may take up to
+session and active window.
+
+`popupHost` identifies the last outer tmux client and pane used to host a
+managed session opened through the central picker. `popupActive` is true while
+the nested attachment is open and false after it closes; the retained host is a
+persistent popup preference that lets consumers reopen the background agent in
+a popup without switching the outer client. If the recorded host disappears, a
+consumer may choose another graphical client and replace the host metadata. The
+host differs from `@agent_origin`: the origin is where the agent was initially
+launched, while `popupHost` describes its most recent presentation. Panes that
+have never been presented this way have a null `popupHost` and false
+`popupActive`. Updates normally follow `@agent_screen_interval_ms`; a plain
+working-to-idle transition may take up to
 700ms longer for redraw confirmation.
 
 For example, an agent can inspect existing peers at startup (the following

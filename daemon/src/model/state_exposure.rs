@@ -126,6 +126,14 @@ impl StateCenter {
                     record.map(|value| value.state),
                     Some(AgentState::Working | AgentState::Blocked)
                 );
+                let popup_host = row.popup_host.as_ref().map(|host| {
+                    json!({
+                        "client": host.client,
+                        "sessionId": host.session_id,
+                        "windowId": host.window_id,
+                        "paneId": host.pane_id
+                    })
+                });
                 json!({
                     "sessionId": row.session_id,
                     "sessionName": row.session_name,
@@ -140,6 +148,8 @@ impl StateCenter {
                     "paneTitle": row.pane_title,
                     "paneActive": row.pane_active,
                     "visible": row.visible,
+                    "popupHost": popup_host,
+                    "popupActive": row.popup_active,
                     "command": row.command,
                     "currentPath": row.current_path,
                     "agent": agent,
@@ -157,7 +167,7 @@ impl StateCenter {
             .unwrap_or_default()
             .as_secs();
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generatedAt": generated_at,
             "panes": panes
         })

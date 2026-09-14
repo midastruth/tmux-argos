@@ -21,6 +21,8 @@
             configured_tool: "pi".into(),
             pane_active: true,
             visible: true,
+            popup_host: None,
+            popup_active: false,
         }
     }
 
@@ -62,7 +64,7 @@
     #[test]
     fn pane_parser_preserves_common_separators_and_rejects_boundary_injection() {
         let separator = PANE_FIELD_SEPARATOR;
-        let record = [
+        let mut fields = [
             "work",
             "$1",
             "1",
@@ -79,12 +81,32 @@
             "title",
             "pi",
             "1",
-        ]
-        .join(&separator.to_string());
+            "",
+            "",
+            "",
+            "",
+            "",
+        ];
+        let record = fields.join(&separator.to_string());
         let pane = parse_pane_record(&record).unwrap();
         assert_eq!(pane.window_name, "editor\tmain");
         assert_eq!(pane.current_path, "/tmp/project\nname");
         assert!(pane.visible);
+        assert!(pane.popup_host.is_none());
+        assert!(!pane.popup_active);
+
+        fields[16] = "/dev/pts/1";
+        fields[17] = "$0";
+        fields[18] = "@38";
+        fields[19] = "%41";
+        fields[20] = "on";
+        let popup_pane = parse_pane_record(&fields.join(&separator.to_string())).unwrap();
+        assert!(popup_pane.popup_active);
+        let popup_host = popup_pane.popup_host.unwrap();
+        assert_eq!(popup_host.client, "/dev/pts/1");
+        assert_eq!(popup_host.session_id, "$0");
+        assert_eq!(popup_host.window_id, "@38");
+        assert_eq!(popup_host.pane_id, "%41");
 
         let injected = record.replacen("editor\tmain", "bad\u{1f}field", 1);
         assert!(parse_pane_record(&injected).is_none());
@@ -113,7 +135,7 @@
 
         let snapshot = state.inspect().unwrap();
         let pane = &snapshot["panes"][0];
-        assert_eq!(snapshot["schemaVersion"], 1);
+        assert_eq!(snapshot["schemaVersion"], 2);
         assert_eq!(pane["sessionName"], "agent-pi-project-1");
         assert_eq!(pane["windowName"], "editor\tmain");
         assert_eq!(pane["paneIndex"], 1);
@@ -123,7 +145,36 @@
         assert_eq!(pane["activity"], "active");
         assert_eq!(pane["agentState"], "working");
         assert_eq!(pane["visible"], true);
+        assert!(pane["popupHost"].is_null());
+        assert_eq!(pane["popupActive"], false);
         assert!(serde_json::to_string(&snapshot).unwrap().contains("editor\\tmain"));
+    }
+
+    #[test]
+    fn state_exposure_distinguishes_active_and_background_popup_agents() {
+        let mut state = StateCenter::new(
+            "/nonexistent".into(),
+            exposure_config(ExposureMode::Socket, None),
+        );
+        let mut pane = exposure_pane();
+        pane.popup_host = Some(PopupHost {
+            client: "/dev/pts/1".into(),
+            session_id: "$0".into(),
+            window_id: "@38".into(),
+            pane_id: "%41".into(),
+        });
+        state.pane_rows = vec![pane];
+
+        let background = state.inspect().unwrap();
+        assert_eq!(background["panes"][0]["popupActive"], false);
+        state.pane_rows[0].popup_active = true;
+        let active = state.inspect().unwrap();
+        assert_eq!(active["panes"][0]["popupActive"], true);
+        let popup_host = &active["panes"][0]["popupHost"];
+        assert_eq!(popup_host["client"], "/dev/pts/1");
+        assert_eq!(popup_host["sessionId"], "$0");
+        assert_eq!(popup_host["windowId"], "@38");
+        assert_eq!(popup_host["paneId"], "%41");
     }
 
     #[test]

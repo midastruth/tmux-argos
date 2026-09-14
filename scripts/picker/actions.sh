@@ -255,8 +255,44 @@ kill_matched_sessions() {
   report_bulk_kill_result
 }
 
+record_popup_host() {
+  local target="$1" parent="$2" separator context
+  local host_session_id host_window_id host_pane_id
+  local client session_id window_id pane_id
+  [ -n "$parent" ] || return 1
+
+  separator=$'\037'
+  context=$(tmux list-clients -F \
+    "#{s|${separator}| |:client_name}${separator}#{session_id}${separator}#{window_id}${separator}#{pane_id}" \
+    2>/dev/null) || return 1
+  host_session_id=''
+  host_window_id=''
+  host_pane_id=''
+  while IFS="$separator" read -r client session_id window_id pane_id; do
+    [ "$client" = "$parent" ] || continue
+    host_session_id="$session_id"
+    host_window_id="$window_id"
+    host_pane_id="$pane_id"
+    break
+  done <<< "$context"
+  [[ "$host_session_id" =~ ^\$[0-9]+$ ]] || return 1
+  [[ "$host_window_id" =~ ^@[0-9]+$ ]] || return 1
+  [[ "$host_pane_id" =~ ^%[0-9]+$ ]] || return 1
+
+  tmux set-option -t "$target" @agent_popup_host_client "$parent" \
+    \; set-option -t "$target" @agent_popup_host_session_id "$host_session_id" \
+    \; set-option -t "$target" @agent_popup_host_window_id "$host_window_id" \
+    \; set-option -t "$target" @agent_popup_host_pane_id "$host_pane_id" \
+    \; set-option -t "$target" @agent_popup_active on 2>/dev/null
+}
+
+mark_popup_inactive() {
+  local target="$1"
+  tmux set-option -u -t "$target" @agent_popup_active 2>/dev/null
+}
+
 open_session_target() {
-  local target="$1" origin parent
+  local target="$1" origin parent attach_status popup_host_recorded
   [[ "$target" =~ ^\$[0-9]+$ ]] || return 1
   # Move the underlying parent client to the session's origin window (best-effort),
   # then resume the session in THIS popup over it. Falls back to resuming over the
@@ -270,7 +306,16 @@ open_session_target() {
   # Opening a completed session marks it as seen.
   mark_managed_session_seen_if_done "$target"
 
+  popup_host_recorded=0
+  if record_popup_host "$target" "$parent"; then
+    popup_host_recorded=1
+  fi
   tmux attach-session -t "$target"
+  attach_status=$?
+  if [ "$popup_host_recorded" -eq 1 ]; then
+    mark_popup_inactive "$target" || true
+  fi
+  return "$attach_status"
 }
 
 open_pane_target() {

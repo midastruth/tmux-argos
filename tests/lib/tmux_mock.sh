@@ -17,6 +17,7 @@
 #                              STATUS fixture otherwise
 #   TMUX_MOCK_LIST_CLIENTS     tab-separated client_name, session_name,
 #                              client_pid rows
+#   TMUX_MOCK_CLIENT_CONTEXT   client|session_id|window_id|pane_id rows
 #   TMUX_MOCK_SERVER_PID       value for the #{pid} server-pid format
 #   TMUX_MOCK_HAS_SESSION      "yes" to make every has-session succeed
 #   TMUX_MOCK_EXISTING_SESSIONS space-separated session names that exist
@@ -255,6 +256,15 @@ case "$cmd" in
     ;;
   list-clients)
     joined=" $* "
+    if [[ "$joined" == *'#{session_id}'* && "$joined" == *'#{window_id}'* &&
+      "$joined" == *'#{pane_id}'* ]]; then
+      while IFS='|' read -r context_client context_session context_window context_pane; do
+        [ -n "$context_client" ] || continue
+        printf '%s\037%s\037%s\037%s\n' \
+          "$context_client" "$context_session" "$context_window" "$context_pane"
+      done <<< "${TMUX_MOCK_CLIENT_CONTEXT:-}"
+      exit 0
+    fi
     while IFS=$'\t' read -r client session pid; do
       [ -n "$client" ] || continue
       if [[ "$joined" == *'#{client_pid}'* ]]; then

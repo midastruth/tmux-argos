@@ -104,11 +104,31 @@ fn parse_pane_flag(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_popup_host(fields: &[&str]) -> Option<PopupHost> {
+    let client = fields[16];
+    let session_id = fields[17];
+    let window_id = fields[18];
+    let pane_id = fields[19];
+    if client.is_empty()
+        || !valid_tmux_id(session_id, '$')
+        || !valid_tmux_id(window_id, '@')
+        || !valid_tmux_id(pane_id, '%')
+    {
+        return None;
+    }
+    Some(PopupHost {
+        client: client.into(),
+        session_id: session_id.into(),
+        window_id: window_id.into(),
+        pane_id: pane_id.into(),
+    })
+}
+
 fn parse_pane_record(record: &str) -> Option<PaneRow> {
     let record = record.strip_prefix('\n').unwrap_or(record);
     let record = record.strip_prefix('\r').unwrap_or(record);
     let fields: Vec<&str> = record.split(PANE_FIELD_SEPARATOR).collect();
-    if fields.len() != 16 {
+    if fields.len() != 21 {
         return None;
     }
     if fields[0].is_empty()
@@ -121,6 +141,8 @@ fn parse_pane_record(record: &str) -> Option<PaneRow> {
     let session_attached = fields[2].parse::<u32>().ok()? > 0;
     let window_active = parse_pane_flag(fields[7])?;
     let pane_active = parse_pane_flag(fields[15])?;
+    let popup_host = parse_popup_host(&fields);
+    let popup_active = popup_host.is_some() && fields[20] == "on";
     Some(PaneRow {
         session_name: fields[0].into(),
         session_id: fields[1].into(),
@@ -139,6 +161,8 @@ fn parse_pane_record(record: &str) -> Option<PaneRow> {
         configured_tool: fields[14].into(),
         pane_active,
         visible: session_attached && window_active && pane_active,
+        popup_host,
+        popup_active,
     })
 }
 
@@ -151,7 +175,12 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
         "#{s|\x1f| |;s|\x1e| |:pane_current_command}\x1f",
         "#{s|\x1f| |;s|\x1e| |:pane_current_path}\x1f#{pane_pid}\x1f",
         "#{s|\x1f| |;s|\x1e| |:pane_title}\x1f",
-        "#{s|\x1f| |;s|\x1e| |:@agent_tool}\x1f#{pane_active}\x1e"
+        "#{s|\x1f| |;s|\x1e| |:@agent_tool}\x1f#{pane_active}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:@agent_popup_host_client}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:@agent_popup_host_session_id}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:@agent_popup_host_window_id}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:@agent_popup_host_pane_id}\x1f",
+        "#{s|\x1f| |;s|\x1e| |:@agent_popup_active}\x1e"
     );
     let output = tmux_output(server_socket, &["list-panes", "-a", "-F", format])?;
     Some(
