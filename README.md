@@ -107,6 +107,15 @@ Inside the picker:
 | `ctrl-r`                  | Confirm, then kill all currently matched managed sessions except sessions that are `working` or `blocked` |
 | `↑` / `↓`, type to filter | fzf navigation                                                             |
 
+The picker runs in a short-lived internal tmux session. Opening a managed
+session switches the popup's already-attached tmux client instead of starting a
+second client after fzf exits. This keeps keyboard input continuous during the
+transition, so an immediate `Esc` sequence is delivered to Pi/Codex rather than
+being interpreted as a request to close the popup. Pressing `prefix` + `u`
+again while the picker is open closes it instead of opening a nested popup. The
+internal session is removed automatically when the picker closes or switches to
+a target.
+
 `ctrl-r` operates on the rows currently matched by fzf. Type part of a project,
 tool, path, or session display name to narrow the list, then press `ctrl-r` to
 kill every matched managed session in one action. With an empty query, every

@@ -286,36 +286,52 @@ record_popup_host() {
     \; set-option -t "$target" @agent_popup_active on 2>/dev/null
 }
 
-mark_popup_inactive() {
-  local target="$1"
-  tmux set-option -u -t "$target" @agent_popup_active 2>/dev/null
+find_picker_popup_client() {
+  local separator context client session_id window_id pane_id
+  [[ "${TMUX_PANE:-}" =~ ^%[0-9]+$ ]] || return 1
+
+  separator=$'\037'
+  context="$(tmux list-clients -F \
+    "#{s|${separator}| |:client_name}${separator}#{session_id}${separator}#{window_id}${separator}#{pane_id}" \
+    2>/dev/null)" || return 1
+  while IFS="$separator" read -r client session_id window_id pane_id; do
+    [[ "$session_id" =~ ^\$[0-9]+$ ]] || continue
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
+    [ "$pane_id" = "$TMUX_PANE" ] || continue
+    printf '%s\n' "$client"
+    return 0
+  done <<< "$context"
+  return 1
 }
 
 open_session_target() {
-  local target="$1" origin parent attach_status popup_host_recorded
+  local target="$1" origin parent popup_host_recorded picker_popup_client
   [[ "$target" =~ ^\$[0-9]+$ ]] || return 1
-  # Move the underlying parent client to the session's origin window (best-effort),
-  # then resume the session in THIS popup over it. Falls back to resuming over the
-  # current window when origin/parent are unknown.
+  if ! picker_popup_client="$(find_picker_popup_client)"; then
+    tmux display-message 'tmux-argos: picker popup client is unavailable'
+    return 1
+  fi
+
+  # Move the underlying parent client to the session's origin window while the
+  # already-attached nested client remains responsible for popup input.
   origin=$(tmux show-options -qv -t "$target" @agent_origin 2>/dev/null)
   parent="${parent_client:-}"
   [ -n "$parent" ] || parent=$(tmux show-options -gqv @agent_parent 2>/dev/null)
   [ -n "$origin" ] && [ -n "$parent" ] &&
     tmux switch-client -c "$parent" -t "$origin" 2>/dev/null
 
-  # Opening a completed session marks it as seen.
   mark_managed_session_seen_if_done "$target"
-
   popup_host_recorded=0
   if record_popup_host "$target" "$parent"; then
     popup_host_recorded=1
   fi
-  tmux attach-session -t "$target"
-  attach_status=$?
-  if [ "$popup_host_recorded" -eq 1 ]; then
-    mark_popup_inactive "$target" || true
+  if tmux switch-client -c "$picker_popup_client" -t "$target"; then
+    return 0
   fi
-  return "$attach_status"
+  if [ "$popup_host_recorded" -eq 1 ]; then
+    tmux set-option -u -t "$target" @agent_popup_active 2>/dev/null || true
+  fi
+  return 1
 }
 
 open_pane_target() {
@@ -333,14 +349,18 @@ open_pane_target() {
 }
 
 open_history_target() {
-  local source="$1" agent="$2" cwd="$3" resume="$4" parent window
+  local source="$1" agent="$2" cwd="$3" resume="$4" parent window picker_popup_client
   [ -n "$source" ] && [ -n "$cwd" ] && [ -n "$resume" ] || return 0
+  if ! picker_popup_client="$(find_picker_popup_client)"; then
+    tmux display-message 'tmux-argos: picker popup client is unavailable'
+    return 1
+  fi
   parent="${parent_client:-}"
   window=''
   if [ -n "$parent" ]; then
     window="$(tmux display-message -p -c "$parent" '#{window_id}' 2>/dev/null || true)"
   fi
-  "$DIR/launch.sh" --attach "$cwd" "$window" "$agent" "$resume"
+  "$DIR/launch.sh" --popup-client "$picker_popup_client" "$cwd" "$window" "$agent" "$resume"
 }
 
 open_target() {

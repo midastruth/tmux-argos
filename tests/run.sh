@@ -92,7 +92,7 @@ reset_mocks() {
     TMUX_MOCK_LIST_SESSIONS TMUX_MOCK_LIST_PANES TMUX_MOCK_LIST_CLIENTS \
     TMUX_MOCK_CLIENT_CONTEXT \
     TMUX_MOCK_LIST_PANES_PICKER TMUX_MOCK_LIST_PANES_STATUS \
-    TMUX_MOCK_HAS_SESSION TMUX_MOCK_EXISTING_SESSIONS TMUX_MOCK_CURRENT_SESSION \
+    TMUX_MOCK_HAS_SESSION TMUX_MOCK_NEW_SESSION_ID TMUX_MOCK_EXISTING_SESSIONS TMUX_MOCK_CURRENT_SESSION \
     TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_SESSION_ID TMUX_MOCK_PANE_VISIBLE TMUX_MOCK_SERVER_PID \
     TMUX_MOCK_FAIL_TARGETS \
     TMUX_MOCK_FAIL_REFRESH_CLIENT TMUX_MOCK_FAIL_RUN_SHELL \
@@ -224,6 +224,17 @@ run_bash '. scripts/helpers.sh; mark_pane_seen_if_done %7' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_not_contains 'mark_pane_seen_if_done leaves non-done pane unchanged' "$log_contents" $'set-option\t-p\t-t\t%7\t@agent_state\tidle'
 
+# Repeating the list binding inside the internal picker client is a toggle, not
+# permission to create a popup recursively inside the existing popup.
+reset_mocks
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_TARGET_OPTIONS=$'7|@agent_picker_session=on'
+TMUX_MOCK_LIST_CLIENTS=$'/dev/pts/picker\t7\t300'
+run_bash "scripts/list.sh /dev/pts/picker" >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'prefix+u inside the picker closes its nested client' "$log_contents" $'detach-client\t-t\t/dev/pts/picker'
+assert_not_contains 'prefix+u inside the picker never opens a nested popup' "$log_contents" $'display-popup\t'
+
 # list.sh: a regular terminal client switched directly into a managed session
 # must not be mistaken for the nested client created by display-popup.
 reset_mocks
@@ -289,23 +300,49 @@ assert_eq 'picker tab-containing metadata retains the trusted session ID' "$(pri
 
 # @acceptance-id:immutable-session-open
 reset_mocks
+TMUX_PANE='%90'
+TMUX_MOCK_CLIENT_CONTEXT=$'test-client|$0|@38|%41\n/dev/pts/popup|$90|@90|%90'
 FZF_MOCK_OUTPUT="$injected_row"
 run_bash 'scripts/picker.sh test-client' >/dev/null
-assert_contains 'picker Enter cannot open a session ID injected through metadata' "$(<"$TMUX_LOG")" $'attach-session\t-t\t$31'
-assert_not_contains 'picker Enter ignores an injected metadata session ID' "$(<"$TMUX_LOG")" $'attach-session\t-t\t$99'
+assert_contains 'picker Enter cannot open a session ID injected through metadata' "$(<"$TMUX_LOG")" $'switch-client\t-c\t/dev/pts/popup\t-t\t$31'
+assert_not_contains 'picker Enter ignores an injected metadata session ID' "$(<"$TMUX_LOG")" $'switch-client\t-c\t/dev/pts/popup\t-t\t$99'
+
+# A picker popup must keep one nested tmux client alive across the Enter
+# transition. Starting a second client after fzf exits creates a terminal-mode
+# gap where tmux's popup handles Escape itself instead of forwarding it.
+reset_mocks
+TMUX_PANE='%90'
+TMUX_MOCK_CLIENT_CONTEXT=$'/dev/pts/outer|$0|@38|%41\n/dev/pts/popup|$90|@90|%90'
+FZF_MOCK_OUTPUT="$injected_row"
+run_bash 'scripts/picker.sh /dev/pts/outer' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'picker Enter reuses the popup tmux client without an input handoff gap' "$log_contents" $'switch-client\t-c\t/dev/pts/popup\t-t\t$31'
+assert_not_contains 'picker Enter does not start a second tmux client after fzf exits' "$log_contents" $'attach-session\t-t\t$31'
 
 reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
 TMUX_MOCK_LIST_SESSIONS=$'agent-pi\t$31\tidle\t100\t/tmp/project\tpi\tpi\t1'
-TMUX_MOCK_CLIENT_CONTEXT=$'/dev/pts/1|$0|@38|%41'
+TMUX_PANE='%90'
+TMUX_MOCK_CLIENT_CONTEXT=$'/dev/pts/1|$0|@38|%41\n/dev/pts/popup|$90|@90|%90'
 FZF_MOCK_OUTPUT="$(run_bash 'PICKER_NOW=100 scripts/picker.sh --list')"
 run_bash 'scripts/picker.sh /dev/pts/1' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'picker opening a managed session records the popup host client' "$log_contents" $'set-option\t-t\t$31\t@agent_popup_host_client\t/dev/pts/1'
 assert_contains 'picker opening a managed session records the popup host topology' "$log_contents" $'@agent_popup_host_session_id\t$0\t;\tset-option\t-t\t$31\t@agent_popup_host_window_id\t@38\t;\tset-option\t-t\t$31\t@agent_popup_host_pane_id\t%41'
 assert_contains 'picker opening a managed session marks the popup active' "$log_contents" $'set-option\t-t\t$31\t@agent_popup_active\ton'
-assert_contains 'closing the managed popup marks its popup preference inactive' "$log_contents" $'set-option\t-u\t-t\t$31\t@agent_popup_active'
+assert_not_contains 'session switch leaves popup activity owned by the popup host' "$log_contents" $'set-option\t-u\t-t\t$31\t@agent_popup_active'
 assert_not_contains 'closing the managed popup preserves its popup host preference' "$log_contents" $'set-option\t-u\t-t\t$31\t@agent_popup_host_client'
+
+reset_mocks
+TMUX_MOCK_NEW_SESSION_ID="$(printf '$%s' 90)"
+TMUX_MOCK_LIST_SESSIONS=$'$31\t/dev/pts/1\ton'
+run_bash 'scripts/picker_host.sh /dev/pts/1' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'picker host marks its internal session against recursive popups' "$log_contents" $'set-option\t-t\t$90\t@agent_picker_session\ton'
+assert_contains 'picker host hides status in its internal session' "$log_contents" $'set-option\t-t\t$90\tstatus\toff'
+assert_contains 'picker host attaches one nested client before fzf starts' "$log_contents" $'attach-session\t-t\t$90'
+assert_contains 'picker host clears popup activity after its nested client exits' "$log_contents" $'set-option\t-u\t-t\t$31\t@agent_popup_active'
+assert_contains 'picker host removes its temporary picker session' "$log_contents" $'kill-session\t-t\t$90'
 
 reset_mocks
 injected_kind="$(printf '%s\n' "$injected_row" | cut -f2)"
@@ -490,17 +527,17 @@ assert_not_contains 'launch.sh does not open popup for unknown agent' "$log_cont
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'
 TMUX_MOCK_OPTIONS=$'@agent_agents=pi=pi --custom'
-run_bash 'scripts/launch.sh --attach /tmp @9 pi /tmp/pi-session.jsonl' >/dev/null
+run_bash 'scripts/launch.sh --popup-client /dev/pts/popup /tmp @9 pi /tmp/pi-session.jsonl' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'launch.sh resumes Pi history by file' "$log_contents" $'pi --custom --session /tmp/pi-session.jsonl'
 assert_contains 'launch.sh records the resumed history reference' "$log_contents" $'@agent_history_id\t/tmp/pi-session.jsonl'
-assert_contains 'launch.sh attaches history inside the picker popup' "$log_contents" $'attach-session\t-t\tagent-pi-'
+assert_contains 'launch.sh switches the existing picker client to resumed history' "$log_contents" $'switch-client\t-c\t/dev/pts/popup\t-t\tagent-pi-'
 assert_not_contains 'launch.sh does not open a second popup for history' "$log_contents" $'display-popup\t'
 
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'
 TMUX_MOCK_OPTIONS=$'@agent_agents=codex=codex --search\n@agent_multiple_instances=off'
-run_bash 'scripts/launch.sh --attach /tmp @9 codex 019f-codex' >/dev/null
+run_bash 'scripts/launch.sh --popup-client /dev/pts/popup /tmp @9 codex 019f-codex' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'launch.sh resumes Codex history by session id' "$log_contents" $'codex --search resume 019f-codex'
 assert_contains 'launch.sh forces a numbered session for selected history' "$log_contents" $'new-session\t-d\t-s\tagent-codex-'
@@ -508,7 +545,7 @@ assert_contains 'launch.sh forces a numbered session for selected history' "$log
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'
 TMUX_MOCK_OPTIONS=$'@agent_agents=claude=claude'
-run_bash 'scripts/launch.sh --attach /tmp @9 claude claude-id' >/dev/null
+run_bash 'scripts/launch.sh --popup-client /dev/pts/popup /tmp @9 claude claude-id' >/dev/null
 assert_contains 'launch.sh resumes Claude history by session id' "$(<"$TMUX_LOG")" $'claude --resume claude-id'
 
 # daemon client / lifecycle integration
@@ -802,11 +839,13 @@ assert_contains 'picker ctrl-r binding reloads rows after bulk kill' "$fzf_argum
 assert_contains 'picker header explains confirmation and protected states' "$fzf_arguments" 'confirm bulk kill except working/blocked'
 
 reset_mocks
+TMUX_PANE='%90'
+TMUX_MOCK_CLIENT_CONTEXT=$'test-client|$0|@38|%41\n/dev/pts/popup|$90|@90|%90'
 FZF_MOCK_OUTPUT=$'2\tsession\tstale-reused-name\t🟢 idle   \tproject\t1m\t/tmp/project\twaiting\tpi\tidle\t$44\t\tdisplay'
 run_bash 'scripts/picker.sh test-client' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_contains 'picker opens the selected managed session by immutable ID' "$log_contents" $'attach-session\t-t\t$44'
-assert_not_contains 'picker never opens a same-name replacement' "$log_contents" $'attach-session\t-t\tstale-reused-name'
+assert_contains 'picker opens the selected managed session by immutable ID' "$log_contents" $'switch-client\t-c\t/dev/pts/popup\t-t\t$44'
+assert_not_contains 'picker never opens a same-name replacement' "$log_contents" $'switch-client\t-c\t/dev/pts/popup\t-t\tstale-reused-name'
 
 # A missing daemon snapshot must retain the tmux recovery mirror in the picker.
 reset_mocks

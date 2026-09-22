@@ -73,6 +73,17 @@ my_session=''
 [ -n "$invoking_client" ] && my_session="$(client_session "$invoking_client")"
 host=''
 
+# The picker itself owns one nested client. Treat the same binding there as a
+# close toggle; opening another popup on that client would recurse indefinitely.
+picker_session_marker=''
+if [ -n "$my_session" ]; then
+  picker_session_marker="$(tmux show-options -qv -t "$my_session" @agent_picker_session 2>/dev/null || true)"
+fi
+if [ "$picker_session_marker" = on ]; then
+  tmux detach-client -t "$invoking_client"
+  exit $?
+fi
+
 if [ -n "$my_session" ] && is_managed_session "$my_session" &&
   is_server_spawned_client "$invoking_client"; then
   # This is an actual nested client, not a regular client switched into the
@@ -96,13 +107,13 @@ fi
 # best-effort fallback to another ordinary client.
 [ -n "$host" ] || host="$(host_client)"
 
-# Host the picker on the outer client. -c is honored because that client has no
-# popup open now; pass the parent client as an argument instead of storing it in
-# a global tmux option, so concurrent tmux clients do not clobber one another.
-picker_q=$(printf '%q' "$DIR/picker.sh")
+# Host the picker on the outer client. The host script attaches one nested tmux
+# client before starting fzf; Enter can then switch that existing client without
+# exposing a terminal-mode gap where the popup itself would consume Escape.
+picker_host_q=$(printf '%q' "$DIR/picker_host.sh")
 host_q=$(printf '%q' "$host")
 if [ -n "$host" ]; then
-  tmux display-popup -c "$host" -w "$w" -h "$h" -E "$picker_q $host_q"
+  tmux display-popup -c "$host" -w "$w" -h "$h" -E "$picker_host_q $host_q"
 else
-  tmux display-popup -w "$w" -h "$h" -E "$picker_q"
+  tmux display-popup -w "$w" -h "$h" -E "$picker_host_q"
 fi

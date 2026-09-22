@@ -20,6 +20,7 @@
 #   TMUX_MOCK_CLIENT_CONTEXT   client|session_id|window_id|pane_id rows
 #   TMUX_MOCK_SERVER_PID       value for the #{pid} server-pid format
 #   TMUX_MOCK_HAS_SESSION      "yes" to make every has-session succeed
+#   TMUX_MOCK_NEW_SESSION_ID   ID printed by new-session with -P
 #   TMUX_MOCK_EXISTING_SESSIONS space-separated session names that exist
 #   TMUX_MOCK_CURRENT_SESSION  session name for '#S' display-message formats
 #   TMUX_MOCK_PANE_SESSION     session name for '#{session_name}' formats
@@ -318,7 +319,13 @@ case "$cmd" in
     target_should_fail "$target" && exit 1
     exit 0
     ;;
-  new-session|set-option|set-hook|display-popup|send-keys|attach-session|switch-client|detach-client)
+  new-session)
+    if [[ " $* " == *' -P '* ]]; then
+      printf '%s\n' "${TMUX_MOCK_NEW_SESSION_ID:-}"
+    fi
+    exit 0
+    ;;
+  set-option|set-hook|display-popup|send-keys|attach-session|switch-client|detach-client)
     exit 0
     ;;
   run-shell)

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Launch a numbered agent session for a directory, shown in a popup.
-# Args: [--attach] <dir> [origin-window-id] [agent-name] [resume-ref]
+# Args: [--popup-client <client>] <dir> [origin-window-id] [agent-name] [resume-ref]
 #   <dir> / [origin-window-id] are expanded by run-shell in the binding.
 #   [agent-name] selects an entry from @agent_agents (pi/codex/claude...).
-#   [resume-ref] resumes saved Pi/Codex/Claude history. --attach reuses the
-#   current picker popup instead of trying to open a second popup.
+#   [resume-ref] resumes saved history. --popup-client switches the picker's
+#   already-attached nested client instead of opening another popup.
 #   When agent-name is omitted, @agent_default_command is used.
 # By default each launch creates a numbered instance. Set
 # @agent_multiple_instances off to restore one session per directory/agent.
@@ -13,10 +13,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=helpers.sh
 . "$DIR/helpers.sh"
 
-attach_in_current_popup=0
-if [ "${1:-}" = '--attach' ]; then
-  attach_in_current_popup=1
-  shift
+popup_client=''
+if [ "${1:-}" = '--popup-client' ]; then
+  popup_client="${2:-}"
+  [ -n "$popup_client" ] || exit 1
+  shift 2
 fi
 
 path="${1:-$PWD}"
@@ -135,8 +136,8 @@ fi
 mark_managed_session_seen_if_done "$session"
 
 session_q=$(printf '%q' "$session")
-if [ "$attach_in_current_popup" -eq 1 ]; then
-  tmux attach-session -t "$session"
+if [ -n "$popup_client" ]; then
+  tmux switch-client -c "$popup_client" -t "$session"
 else
   tmux display-popup -w "$w" -h "$h" -E "tmux attach-session -t $session_q"
 fi
