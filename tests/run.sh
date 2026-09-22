@@ -251,14 +251,17 @@ assert_contains 'list.sh opens picker on the direct managed-session client' "$lo
 # client should be detached; other clients on its managed session must survive.
 reset_mocks
 TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_TARGET_OPTIONS=$'agent-a|@agent_popup_host_client=/dev/pts/1'
 TMUX_MOCK_SERVER_PID=100
-TMUX_MOCK_LIST_CLIENTS=$'/dev/pts/1\twork\t200\n/dev/pts/2\tagent-a\t300'
+TMUX_MOCK_LIST_CLIENTS=$'/dev/pts/other\twork\t201\n/dev/pts/1\twork\t200\n/dev/pts/2\tagent-a\t300'
 TMUX_MOCK_PS_CHILDREN=$'100=250\n250=300'
 run_bash "scripts/list.sh /dev/pts/2" >/dev/null
 log_contents="$(<"$TMUX_LOG")"
 assert_contains 'list.sh detaches only the nested popup client' "$log_contents" $'detach-client\t-t\t/dev/pts/2'
 assert_not_contains 'list.sh never detaches a whole managed session' "$log_contents" $'detach-client\t-s\t'
-assert_contains 'list.sh reopens picker on an outer client' "$log_contents" $'display-popup\t-c\t/dev/pts/1'
+assert_contains 'list.sh closes the old agent popup on its recorded host' "$log_contents" $'display-popup\t-C\t-c\t/dev/pts/1'
+assert_contains 'list.sh reopens picker on its recorded outer client' "$log_contents" $'display-popup\t-c\t/dev/pts/1'
+assert_not_contains 'list.sh does not move the picker to another ordinary client' "$log_contents" $'display-popup\t-c\t/dev/pts/other'
 
 # If the invoking client disappears before list.sh resolves it, use another
 # valid ordinary client rather than targeting the stale client name.

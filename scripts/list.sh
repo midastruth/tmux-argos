@@ -58,9 +58,18 @@ client_exists() {
     awk -v me="$wanted" '$0 == me { found=1 } END { exit !found }'
 }
 
-# Pick an ordinary client to host the picker after a nested client detaches.
-# tmux exposes no popup-owner format, so exact parent selection would require
-# an explicit mapping recorded when the popup is created.
+recorded_popup_host_client() {
+  local session="$1" client
+  if ! client="$(tmux show-options -qv -t "$session" @agent_popup_host_client 2>/dev/null)"; then
+    return 1
+  fi
+  [ -n "$client" ] || return 1
+  client_exists "$client" || return 1
+  printf '%s\n' "$client"
+}
+
+# Pick an ordinary client only when the popup predates host recording or was
+# opened directly by the launcher.
 host_client() {
   local client session
   tmux list-clients -F '#{client_name}	#{session_name}' 2>/dev/null |
@@ -87,8 +96,10 @@ fi
 if [ -n "$my_session" ] && is_managed_session "$my_session" &&
   is_server_spawned_client "$invoking_client"; then
   # This is an actual nested client, not a regular client switched into the
-  # managed session via choose-tree. Find its outer client before detaching it.
-  host="$(host_client)"
+  # managed session via choose-tree. Prefer the exact outer client recorded
+  # when the picker opened this agent; another terminal may also run tmux.
+  host="$(recorded_popup_host_client "$my_session" || true)"
+  [ -n "$host" ] || host="$(host_client)"
   if [ -n "$host" ]; then
     # Detach only this client. `-s <session>` would detach every client viewing
     # the managed session, including unrelated terminals.
@@ -97,6 +108,13 @@ if [ -n "$my_session" ] && is_managed_session "$my_session" &&
       client_exists "$invoking_client" || break
       sleep 0.05
     done
+    # The nested client may disappear before display-popup has removed its
+    # containing popup. tmux silently ignores a new popup command while the old
+    # popup still exists, so close it synchronously before opening the picker.
+    if ! tmux display-popup -C -c "$host"; then
+      tmux display-message 'tmux-argos: failed to close the agent popup'
+      exit 1
+    fi
   fi
 elif [ -n "$my_session" ]; then
   # Normal pane, including a direct choose-tree switch into a managed session.
