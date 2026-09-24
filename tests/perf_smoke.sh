@@ -133,8 +133,12 @@ measure_cpu() {
       return
     fi
     read -r user_seconds system_seconds <"$timing_file"
-    cpu_ms="$(awk -v user="$user_seconds" -v system="$system_seconds" \
-      'BEGIN { printf "%.1f", (user + system) * 1000 }')"
+    # gawk reserves `system` as a builtin, so the awk variables avoid that name.
+    if ! cpu_ms="$(awk -v user_time="$user_seconds" -v system_time="$system_seconds" \
+      'BEGIN { printf "%.1f", (user_time + system_time) * 1000 }')"; then
+      fail "$label CPU time conversion failed"
+      return
+    fi
     samples+=("$cpu_ms")
   done
 
@@ -187,6 +191,12 @@ build_case() {
 
 check_threshold() {
   local label="$1" measured="$2" max="$3" unit="${4:-ms}"
+  # An empty or non-numeric measurement compares as a string in awk and would
+  # silently pass, so a broken measurement is a failure in its own right.
+  if ! [[ "$measured" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    fail "$label measurement '${measured}' is not a number"
+    return
+  fi
   awk -v measured="$measured" -v max="$max" 'BEGIN { exit !(measured <= max) }' ||
     fail "$label ${measured}${unit} exceeded threshold ${max}${unit}"
 }
