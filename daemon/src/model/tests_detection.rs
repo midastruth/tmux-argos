@@ -122,6 +122,30 @@
     }
 
     #[test]
+    fn claude_asterisk_spinner_frame_above_idle_prompt_is_working() {
+        let screen = "answer\n✳ Thinking… (12s · esc to interrupt)\n────────\n❯ \n────────\n  ? for shortcuts\n";
+        assert_eq!(detect_claude("", screen).state, AgentState::Working);
+    }
+
+    #[test]
+    fn claude_idle_prompt_outranks_permission_text_left_in_history() {
+        let answered_permission = "● Bash(rm -rf build)\n  Do you want to proceed?\n  ❯ 1. Yes\n    2. No\n● Done.\n────────\n❯ hello\n────────\n  ? for shortcuts\n";
+        let detection = detect_claude("", answered_permission);
+        assert_eq!(detection.state, AgentState::Idle);
+        assert!(detection.visible_idle);
+        let question_in_answer = "● Would you like to add tests too? Reply yes to continue.\n────────\n❯ ok\n────────\n  ? for shortcuts\n";
+        assert_eq!(detect_claude("", question_in_answer).state, AgentState::Idle);
+    }
+
+    #[test]
+    fn claude_mcp_task_status_counts_only_column_zero_lines_including_wrapped_ones() {
+        let indented_quote = "● Summary:\n  ✽ Checking · 2 MCP tasks still running\n────────\n❯ \n────────\n";
+        assert_eq!(detect_claude("", indented_quote).state, AgentState::Idle);
+        let wrapped_status = "✽ Checking services ·\n  2 MCP tasks still\n  running\n";
+        assert_eq!(detect_claude("", wrapped_status).state, AgentState::Working);
+    }
+
+    #[test]
     fn claude_permission_detects_blocked() {
         let golden = include_str!("../../fixtures/golden/claude-blocked.txt");
         assert_eq!(detect_claude("", golden).state, AgentState::Blocked);

@@ -120,13 +120,18 @@ fn detect_claude(title: &str, screen: &str) -> ScreenDetection {
     if claude_live_working(screen, &lowercase) {
         return detection(AgentState::Working);
     }
+    // A live idle prompt box outranks screen-wide permission wording, which may
+    // belong to an already answered dialog or quoted text left in the history.
+    if claude_prompt_is_idle(screen) {
+        return visible_idle_detection();
+    }
     if claude_model_picker_is_open(&lowercase) {
         return skip_detection();
     }
     if claude_permission_blocks(screen, &lowercase, after_rule) {
         return detection(AgentState::Blocked);
     }
-    if claude_prompt_is_idle(screen) || title.trim_start().starts_with('✳') {
+    if title.trim_start().starts_with('✳') {
         return visible_idle_detection();
     }
     detection(AgentState::Idle)
@@ -237,21 +242,69 @@ fn claude_mcp_tasks_working(bottom: &str, lowercase: &str) -> bool {
     ) {
         return false;
     }
-    bottom.lines().any(|line| {
-        let trimmed = line.trim_start();
-        let Some(marker) = trimmed.chars().next() else {
-            return false;
-        };
-        let text = trimmed.to_ascii_lowercase();
-        is_claude_activity_marker(marker)
-            && text.contains(" mcp task")
-            && text.contains(" still running")
-            && text.contains('·')
-    })
+    let lines: Vec<&str> = bottom.lines().collect();
+    (0..lines.len()).any(|start| claude_mcp_task_status_starts_at(&lines, start))
+}
+
+/// Claude renders activity summaries at column zero and indents its own wrapped
+/// continuations. Anchoring the marker at column zero keeps indented transcript
+/// text from impersonating a running MCP task.
+fn claude_mcp_task_status_starts_at(lines: &[&str], start: usize) -> bool {
+    let Some(summary) = claude_column_zero_status_text(lines[start]) else {
+        return false;
+    };
+    let mut status = summary.to_ascii_lowercase();
+    if ends_with_running_mcp_task_count(&status) {
+        return true;
+    }
+    let continuations = lines[start + 1..]
+        .iter()
+        .take(CLAUDE_STATUS_MAX_CONTINUATION_LINES)
+        .take_while(|line| line.starts_with([' ', '\t']));
+    for continuation in continuations {
+        status.push(' ');
+        status.push_str(&continuation.to_ascii_lowercase());
+        if ends_with_running_mcp_task_count(&status) {
+            return true;
+        }
+    }
+    false
+}
+
+const CLAUDE_STATUS_MAX_CONTINUATION_LINES: usize = 3;
+
+fn claude_column_zero_status_text(line: &str) -> Option<&str> {
+    let marker = line.chars().next()?;
+    if !is_claude_activity_marker(marker) {
+        return None;
+    }
+    let text = &line[marker.len_utf8()..];
+    if !text.starts_with([' ', '\t']) {
+        return None;
+    }
+    Some(text)
+}
+
+fn ends_with_running_mcp_task_count(status_lowercase: &str) -> bool {
+    let Some((summary, task_count)) = status_lowercase.rsplit_once('·') else {
+        return false;
+    };
+    if summary.trim().is_empty() {
+        return false;
+    }
+    let words: Vec<&str> = task_count.split_whitespace().collect();
+    let [count, "mcp", noun, "still", "running"] = words.as_slice() else {
+        return false;
+    };
+    is_positive_decimal(count) && matches!(*noun, "task" | "tasks")
+}
+
+fn is_positive_decimal(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('0') && value.chars().all(|digit| digit.is_ascii_digit())
 }
 
 fn is_claude_activity_marker(character: char) -> bool {
-    matches!(character, '*' | '·' | '✢' | '✶' | '✻' | '✽')
+    matches!(character, '*' | '·' | '✢' | '✳' | '✶' | '✻' | '✽')
 }
 
 fn claude_model_picker_is_open(screen_lowercase: &str) -> bool {

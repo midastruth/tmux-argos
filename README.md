@@ -255,9 +255,13 @@ the previous state, and a non-empty non-spinner title is a visible idle signal.
 
 Claude recognizes Braille and half-circle title spinners, interruptible live
 turns, `/btw` overlays, background agents, and running MCP tasks as `working`.
-Permission/navigation forms, dynamic workflows, and MCP elicitation are
-`blocked`; a live `❯` prompt box or `✳` title is `idle`. Transcript and model
-picker views preserve the previous state.
+Activity lines use Claude's `* · ✢ ✳ ✶ ✻ ✽` spinner frames; MCP task status
+must start at column zero (wrapped continuations are joined) so indented
+transcript text cannot impersonate it. Navigation forms, dynamic workflows, and
+MCP elicitation are `blocked`. A live `❯` prompt box is `idle` and outranks
+permission wording elsewhere on screen, which may be an already answered dialog
+left in the history; otherwise permission prompts are `blocked`, and a `✳`
+title is `idle`. Transcript and model picker views preserve the previous state.
 
 Following Herdr, a plain `working` to `idle` transition is confirmed with three
 100ms rechecks, bounded to 700ms, so a transient TUI redraw does not publish a
