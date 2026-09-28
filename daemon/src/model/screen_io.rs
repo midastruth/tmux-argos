@@ -224,6 +224,9 @@ fn capture_panes_batch(
             ";".into(),
             "display-message".into(),
             "-p".into(),
+            // The marker starts with "--"; without the terminator tmux parses
+            // it as a flag and aborts the whole chain.
+            "--".into(),
             marker.into(),
         ]);
     }

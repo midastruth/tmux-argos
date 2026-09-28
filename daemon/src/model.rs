@@ -335,4 +335,5 @@ mod tests {
     include!("model/tests_state.rs");
     include!("model/tests_exposure.rs");
     include!("model/tests_detection.rs");
+    include!("model/tests_screen_io.rs");
 }
