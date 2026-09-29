@@ -89,7 +89,7 @@ if [ -n "$my_session" ]; then
   picker_session_marker="$(tmux show-options -qv -t "$my_session" @agent_picker_session 2>/dev/null || true)"
 fi
 if [ "$picker_session_marker" = on ]; then
-  tmux detach-client -t "$invoking_client"
+  tmux detach-client -t "${invoking_client}"
   exit $?
 fi
 
@@ -131,7 +131,22 @@ fi
 picker_host_q=$(printf '%q' "$DIR/picker_host.sh")
 host_q=$(printf '%q' "$host")
 if [ -n "$host" ]; then
-  tmux display-popup -c "$host" -w "$w" -h "$h" -E "$picker_host_q $host_q"
+  popup_target=(-c "$host")
+  popup_command="$picker_host_q $host_q"
 else
-  tmux display-popup -w "$w" -h "$h" -E "$picker_host_q"
+  popup_target=()
+  popup_command="$picker_host_q"
 fi
+
+if tmux display-popup "${popup_target[@]}" -w "$w" -h "$h" -E "$popup_command"; then
+  exit 0
+else
+  popup_status=$?
+fi
+
+# display-popup -E waits until the picker closes. tmux returns 129 (SIGHUP)
+# for a normal close, which must not be reported as a run-shell failure.
+if [ "$popup_status" -eq 129 ]; then
+  exit 0
+fi
+exit "$popup_status"

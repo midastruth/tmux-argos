@@ -95,7 +95,7 @@ reset_mocks() {
     TMUX_MOCK_HAS_SESSION TMUX_MOCK_NEW_SESSION_ID TMUX_MOCK_EXISTING_SESSIONS TMUX_MOCK_CURRENT_SESSION \
     TMUX_MOCK_PANE_SESSION TMUX_MOCK_PANE_SESSION_ID TMUX_MOCK_PANE_VISIBLE TMUX_MOCK_SERVER_PID \
     TMUX_MOCK_FAIL_TARGETS \
-    TMUX_MOCK_FAIL_REFRESH_CLIENT TMUX_MOCK_FAIL_RUN_SHELL \
+    TMUX_MOCK_FAIL_REFRESH_CLIENT TMUX_MOCK_FAIL_RUN_SHELL TMUX_MOCK_DISPLAY_POPUP_EXIT_STATUS \
     TMUX_MOCK_IF_SHELL_RESULT TMUX_MOCK_SHOW_HOOKS \
     TMUX_MOCK_PS_CHILDREN TMUX_MOCK_PS_COMM \
     AGENT_SESSION_PREFIX AGENT_DETECT_COMMANDS AGENT_DETECT_WRAPPERS TMUX_PANE \
@@ -262,6 +262,26 @@ assert_not_contains 'list.sh never detaches a whole managed session' "$log_conte
 assert_contains 'list.sh closes the old agent popup on its recorded host' "$log_contents" $'display-popup\t-C\t-c\t/dev/pts/1'
 assert_contains 'list.sh reopens picker on its recorded outer client' "$log_contents" $'display-popup\t-c\t/dev/pts/1'
 assert_not_contains 'list.sh does not move the picker to another ordinary client' "$log_contents" $'display-popup\t-c\t/dev/pts/other'
+
+# tmux display-popup -E waits for the picker to close; a normal close returns
+# 129 (SIGHUP). That should not make run-shell report an error over outer nvim.
+reset_mocks
+TMUX_MOCK_OPTIONS=$'@agent_session_prefix=agent-'
+TMUX_MOCK_TARGET_OPTIONS=$'agent-a|@agent_popup_host_client=/dev/pts/1'
+TMUX_MOCK_SERVER_PID=100
+TMUX_MOCK_LIST_CLIENTS=$'/dev/pts/1\twork\t200\n/dev/pts/2\tagent-a\t300'
+TMUX_MOCK_PS_CHILDREN=$'100=250\n250=300'
+TMUX_MOCK_DISPLAY_POPUP_EXIT_STATUS=129
+run_bash 'scripts/list.sh /dev/pts/2' >/dev/null
+assert_eq 'returning from an agent popup and closing the picker does not report SIGHUP over nvim' '0' "$?"
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'return from agent opens picker before normal close' "$log_contents" $'display-popup\t-c\t/dev/pts/1'
+
+reset_mocks
+TMUX_MOCK_LIST_CLIENTS=$'/dev/pts/1\twork\t200'
+TMUX_MOCK_DISPLAY_POPUP_EXIT_STATUS=1
+run_bash 'scripts/list.sh /dev/pts/1' >/dev/null
+assert_eq 'picker opening failure still reports nonzero exit' '1' "$?"
 
 # If the invoking client disappears before list.sh resolves it, use another
 # valid ordinary client rather than targeting the stale client name.

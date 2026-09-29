@@ -114,7 +114,9 @@ transition, so an immediate `Esc` sequence is delivered to Pi/Codex rather than
 being interpreted as a request to close the popup. Pressing `prefix` + `u`
 again while the picker is open closes it instead of opening a nested popup. The
 internal session is removed automatically when the picker closes or switches to
-a target.
+a target. Closing the picker normally does not report a tmux `run-shell` error
+in the underlying pane (including when that pane runs Neovim); popup failures
+still report an error.
 
 `ctrl-r` operates on the rows currently matched by fzf. Type part of a project,
 tool, path, or session display name to narrow the list, then press `ctrl-r` to

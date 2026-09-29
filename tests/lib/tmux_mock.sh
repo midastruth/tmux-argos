@@ -31,6 +31,8 @@
 #   TMUX_MOCK_FAIL_REFRESH_CLIENT
 #                              non-empty makes refresh-client fail
 #   TMUX_MOCK_FAIL_RUN_SHELL   non-empty makes run-shell fail
+#   TMUX_MOCK_DISPLAY_POPUP_EXIT_STATUS
+#                              exit status of opening a popup (not -C)
 #   TMUX_MOCK_SHOW_HOOKS       hook names returned by show-hooks -g
 #   TMUX_MOCK_IF_SHELL_RESULT  retained for generic if-shell tests
 #
@@ -325,7 +327,13 @@ case "$cmd" in
     fi
     exit 0
     ;;
-  set-option|set-hook|display-popup|send-keys|attach-session|switch-client|detach-client)
+  display-popup)
+    if [ "${1:-}" != -C ] && [ -n "${TMUX_MOCK_DISPLAY_POPUP_EXIT_STATUS:-}" ]; then
+      exit "$TMUX_MOCK_DISPLAY_POPUP_EXIT_STATUS"
+    fi
+    exit 0
+    ;;
+  set-option|set-hook|send-keys|attach-session|switch-client|detach-client)
     exit 0
     ;;
   run-shell)
