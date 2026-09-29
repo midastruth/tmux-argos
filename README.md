@@ -7,14 +7,14 @@ them, see which ones are working vs. finished, and jump back to any session from
 one popup.
 
 This is a tmux plugin for people who launch coding agents per project directory.
-It can keep multiple numbered nested sessions per directory/agent and gives you
+It can keep multiple globally numbered nested sessions per agent and gives you
 a central picker for all of them. Out of the box it manages **pi, codex, and claude**; add
 or swap agents via `@agent_agents`.
 
 ## Features
 
 - 🔢 **Central picker** (`prefix` + `u`) listing every managed agent tmux session, plus panes where a known agent (pi/codex/claude) was started manually. A tool column shows which agent each row is.
-- 🤖 **Multi-agent and multi-instance**: manage pi, codex, and claude side by side; each `prefix` + `y` launch creates a numbered instance such as `pi-1`, `pi-2`, and `pi-3` by default.
+- 🤖 **Multi-agent and multi-instance**: manage pi, codex, and claude side by side; each `prefix` + `y` launch creates a numbered instance such as `pi-1`, `pi-2`, and `pi-3` by default. Numbers are global per agent, so two projects never both show `pi-1`.
 - 🟡 **Live status** per session: `blocked` / `working` / `done` / `idle`
   (Herdr-style Pi/Codex/Claude screen detection; no agent extension required).
 - 🔌 **Structured state exposure**: optionally publish the complete tmux
@@ -186,12 +186,15 @@ claude=claude"
   `Ctrl+p` or the arrow keys to move, number keys to jump, or click an
   entry with the mouse to launch it. With a single agent configured, or
   `@agent_launch_menu off`, it launches directly with no menu.
-- Sessions are **namespaced and numbered per agent**
-  (`agent-<agent>-<hash>-<instance>`), so the same directory can run pi, codex,
-  and claude—or multiple copies of any one of them—without colliding.
+- Sessions are **namespaced per agent and numbered globally**
+  (`agent-<agent>-<instance>`), so any directory can run pi, codex, and
+  claude—or multiple copies of any one of them—without colliding. Each launch
+  takes the lowest free number for that agent across all directories, so a
+  closed instance's number may be reused by a different project.
 - The picker shows a **tool column** with instance labels such as `pi-1` and
-  `pi-2`. Set `@agent_multiple_instances off` to restore the legacy behavior:
-  one reusable session per directory/agent.
+  `pi-2`; the project column tells which directory each instance belongs to.
+  Set `@agent_multiple_instances off` to restore the legacy behavior: one
+  reusable session per directory/agent (`agent-<agent>-<hash-of-dir>`).
 - `@agent_detect_commands` controls which manually-started panes are auto-listed.
 - `@agent_detect_wrappers` controls which wrapper commands (default `node bun npx npm pnpm yarn`) are allowed to trigger a child-process scan.
 
@@ -556,10 +559,10 @@ tmux run-shell /path/to/tmux-argos/tmux-argos.tmux
 ## How it works
 
 - The **launcher** picks an agent from `@agent_agents` (or launches the default),
-  creates a detached `agent-<agent>-<hash-of-dir>-<instance>` tmux session running
-  that agent, records the origin window, agent, and instance, then attaches to it
-  in a popup. With `@agent_multiple_instances off`, it instead opens or reuses the
-  unnumbered session.
+  creates a detached `agent-<agent>-<instance>` tmux session running that agent
+  in the chosen directory, records the origin window, agent, and instance, then
+  attaches to it in a popup. With `@agent_multiple_instances off`, it instead
+  opens or reuses the unnumbered `agent-<agent>-<hash-of-dir>` session.
 - The **daemon** discovers Pi, Codex, and Claude panes and derives their state from the live bottom screen without agent extensions.
 - The **picker** lists tmux sessions matching the prefix and non-prefixed panes
   whose current command is in `@agent_detect_commands` (or a configured wrapper

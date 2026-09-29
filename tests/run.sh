@@ -480,33 +480,45 @@ TMUX_MOCK_CURRENT_SESSION='work'
 TMUX_MOCK_HAS_SESSION='no'
 run_bash 'scripts/launch.sh /tmp/project @9' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_contains 'launch.sh creates numbered default session from path hash' "$log_contents" $'new-session\t-d\t-s\tagent-6533d8b9-1\t-c\t/tmp/project'
-assert_contains 'launch.sh starts Pi directly without a state extension' "$log_contents" $'new-session\t-d\t-s\tagent-6533d8b9-1\t-c\t/tmp/project\tpi'
+assert_contains 'launch.sh creates globally numbered default session without path hash' "$log_contents" $'new-session\t-d\t-s\tagent-1\t-c\t/tmp/project'
+assert_contains 'launch.sh starts Pi directly without a state extension' "$log_contents" $'new-session\t-d\t-s\tagent-1\t-c\t/tmp/project\tpi'
 assert_not_contains 'launch.sh does not inject the removed Pi state extension' "$log_contents" 'tmux-state.ts'
-assert_contains 'launch.sh records instance number' "$log_contents" $'set-option\t-t\tagent-6533d8b9-1\t@agent_instance\t1'
-assert_contains 'launch.sh records origin window' "$log_contents" $'set-option\t-t\tagent-6533d8b9-1\t@agent_origin\t@9'
-assert_contains 'launch.sh opens popup attached to numbered session' "$log_contents" $'display-popup\t-w\t90%\t-h\t90%\t-E\ttmux attach-session -t agent-6533d8b9-1'
+assert_contains 'launch.sh records instance number' "$log_contents" $'set-option\t-t\tagent-1\t@agent_instance\t1'
+assert_contains 'launch.sh records origin window' "$log_contents" $'set-option\t-t\tagent-1\t@agent_origin\t@9'
+assert_contains 'launch.sh opens popup attached to numbered session' "$log_contents" $'display-popup\t-w\t90%\t-h\t90%\t-E\ttmux attach-session -t agent-1'
 
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'
-TMUX_MOCK_EXISTING_SESSIONS='agent-pi-6533d8b9-1 agent-pi-6533d8b9-2'
+TMUX_MOCK_EXISTING_SESSIONS='agent-pi-1 agent-pi-2'
 TMUX_MOCK_OPTIONS=$'@agent_agents=pi=pi'
 run_bash 'scripts/launch.sh /tmp/project @9 pi' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_contains 'launch.sh chooses the next free instance number' "$log_contents" $'new-session\t-d\t-s\tagent-pi-6533d8b9-3\t-c\t/tmp/project'
-assert_contains 'launch.sh labels the selected agent instance' "$log_contents" $'set-option\t-t\tagent-pi-6533d8b9-3\t@agent_instance\t3'
-assert_contains 'launch.sh checks numbered sessions by exact name' "$log_contents" $'has-session\t-t\t=agent-pi-6533d8b9-1'
+assert_contains 'launch.sh chooses the next free instance number' "$log_contents" $'new-session\t-d\t-s\tagent-pi-3\t-c\t/tmp/project'
+assert_contains 'launch.sh labels the selected agent instance' "$log_contents" $'set-option\t-t\tagent-pi-3\t@agent_instance\t3'
+assert_contains 'launch.sh checks numbered sessions by exact name' "$log_contents" $'has-session\t-t\t=agent-pi-1'
+
+# Instance numbers are global per agent: an instance launched from another
+# directory occupies its number, so two projects never both show pi-1.
+reset_mocks
+TMUX_MOCK_CURRENT_SESSION='work'
+TMUX_MOCK_EXISTING_SESSIONS='agent-pi-1'
+TMUX_MOCK_OPTIONS=$'@agent_agents=pi=pi'
+run_bash 'scripts/launch.sh /tmp/other-project @9 pi' >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'launch.sh numbers instances globally across directories' "$log_contents" $'new-session\t-d\t-s\tagent-pi-2\t-c\t/tmp/other-project'
+assert_not_contains 'launch.sh does not reuse instance 1 for a different directory' "$log_contents" $'new-session\t-d\t-s\tagent-pi-1\t'
+assert_not_contains 'launch.sh omits the path hash from numbered session names' "$log_contents" $'new-session\t-d\t-s\tagent-pi-6533d8b9'
 
 # tmux normally treats a target as a prefix. An existing -10 must not make the
 # exact -1 name appear occupied.
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'
-TMUX_MOCK_EXISTING_SESSIONS='agent-pi-6533d8b9-10'
+TMUX_MOCK_EXISTING_SESSIONS='agent-pi-10'
 TMUX_MOCK_OPTIONS=$'@agent_agents=pi=pi'
 run_bash 'scripts/launch.sh /tmp/project @9 pi' >/dev/null
 log_contents="$(<"$TMUX_LOG")"
-assert_contains 'launch.sh does not confuse instance 1 with instance 10' "$log_contents" $'new-session\t-d\t-s\tagent-pi-6533d8b9-1\t-c\t/tmp/project'
-assert_not_contains 'launch.sh does not skip free instance 1 due to prefix matching' "$log_contents" $'new-session\t-d\t-s\tagent-pi-6533d8b9-2'
+assert_contains 'launch.sh does not confuse instance 1 with instance 10' "$log_contents" $'new-session\t-d\t-s\tagent-pi-1\t-c\t/tmp/project'
+assert_not_contains 'launch.sh does not skip free instance 1 due to prefix matching' "$log_contents" $'new-session\t-d\t-s\tagent-pi-2'
 
 reset_mocks
 TMUX_MOCK_CURRENT_SESSION='work'

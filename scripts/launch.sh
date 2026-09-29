@@ -6,8 +6,9 @@
 #   [resume-ref] resumes saved history. --popup-client switches the picker's
 #   already-attached nested client instead of opening another popup.
 #   When agent-name is omitted, @agent_default_command is used.
-# By default each launch creates a numbered instance. Set
-# @agent_multiple_instances off to restore one session per directory/agent.
+# By default each launch creates an instance numbered globally per agent
+# (agent-pi-1, agent-pi-2, ...). Set @agent_multiple_instances off to restore
+# one reusable session per directory/agent.
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=helpers.sh
@@ -36,13 +37,13 @@ if [ -n "$agent" ]; then
     tmux display-message "Unknown agent: $agent"
     exit 0
   }
-  # Namespace the session per agent so pi/codex/claude in the same directory
-  # get distinct sessions instead of colliding on the same path hash.
-  session_base="${prefix}${agent}-$(session_hash "$path")"
+  # Namespace sessions per agent so pi/codex/claude each get their own
+  # instance numbers and never collide with each other.
+  session_stem="${prefix}${agent}-"
 else
   # Default command, unnamespaced session.
   cmd="$(get_tmux_option @agent_default_command "$default_cmd")"
-  session_base="${prefix}$(session_hash "$path")"
+  session_stem="${prefix}"
 fi
 
 if [ -n "$resume_ref" ]; then
@@ -76,11 +77,12 @@ fi
 created=0
 instance=''
 if [ "$multiple_instances" = on ]; then
-  # Reserve the first free numbered name. new-session itself is the atomic
-  # operation: if two launchers race for the same number, the loser retries.
+  # Reserve the first free numbered name. The name deliberately omits the
+  # directory so numbers are global per agent: new-session is then the atomic
+  # operation across all directories, and a racing loser retries.
   instance=1
   while :; do
-    session="${session_base}-${instance}"
+    session="${session_stem}${instance}"
     if tmux has-session -t "=$session" 2>/dev/null; then
       instance=$((instance + 1))
       continue
@@ -97,7 +99,8 @@ if [ "$multiple_instances" = on ]; then
     exit 0
   done
 else
-  session="$session_base"
+  # Single-instance mode reuses one session per directory, keyed by path hash.
+  session="${session_stem}$(session_hash "$path")"
   if ! tmux has-session -t "=$session" 2>/dev/null; then
     if tmux new-session -d -s "$session" -c "$path" "$cmd"; then
       created=1
