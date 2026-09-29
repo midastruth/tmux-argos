@@ -92,6 +92,39 @@ cargo build --release --manifest-path daemon/Cargo.toml
 
 ## Usage
 
+The unified command-line entry point is `./tmux-argos` in the plugin directory
+(or add that directory to `PATH`). Run `./tmux-argos help` for the full command
+list. It requires access to the tmux server; interactive actions such as
+`open` require a current tmux client, and `launch`/`picker` open tmux popups.
+
+```sh
+./tmux-argos agents
+./tmux-argos launch --agent pi --dir "$PWD"
+./tmux-argos picker
+./tmux-argos list
+./tmux-argos preview '$1'   # immutable tmux session ID from list
+./tmux-argos open '$1'
+./tmux-argos kill '$1'      # or a manual agent pane ID (%N) to send Ctrl-C
+./tmux-argos kill-matched my-project
+./tmux-argos kill-all
+./tmux-argos history list
+./tmux-argos history preview pi /path/to/conversation.jsonl
+./tmux-argos history resume pi /path/to/conversation.jsonl
+./tmux-argos status
+./tmux-argos daemon inspect
+```
+
+`list` emits tab-separated picker rows, including immutable session IDs (field
+11 for managed rows) and pane IDs (field 3 for manual rows). `open`, `preview`,
+and `kill` accept only IDs currently listed by the picker, not reusable session
+names. `kill-matched` matches the displayed text; both bulk commands prompt for
+confirmation and use the picker's fresh daemon-state checks to skip
+`working`/`blocked` sessions. `history list` emits the history reader's native
+tab-separated records; pass its source-file field to `history preview` or
+`history resume`. Daemon subcommands are `ensure`, `snapshot`, `inspect`,
+`reload`, and `shutdown`. Configure the plugin through the existing tmux
+`@agent_*` options; status badges and mouse clicks remain tmux UI features.
+
 | Key            | Action                                                                   |
 | -------------- | ------------------------------------------------------------------------ |
 | `prefix` + `y` | Launch a numbered agent instance for the current directory; shows an agent menu when more than one is configured |

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Command-line entry point; keep the implementation with the other scripts.
+set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+exec "$ROOT/scripts/cli.sh" "$@"
