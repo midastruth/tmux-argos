@@ -245,6 +245,74 @@
     }
 
     #[test]
+    fn relay_binary_must_be_a_configured_executable_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "tmux-argos-relay-binary-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("daemon");
+        fs::write(&binary, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(validate_relay_binary(None).is_err());
+        assert!(validate_relay_binary(Some(&directory.join("missing"))).is_err());
+        assert!(validate_relay_binary(Some(&directory)).is_err());
+        assert!(validate_relay_binary(Some(&binary)).is_err());
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_relay_binary(Some(&binary)).is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn relay_uses_the_published_daemon_binary_not_the_running_executable() {
+        let values = config_values(&[("@agent_daemon_binary", "/opt/argos/daemon".into())]);
+        let config = Config::from_values(&values).unwrap();
+        assert_eq!(config.daemon_binary, Some(PathBuf::from("/opt/argos/daemon")));
+        assert_eq!(Config::from_values(&HashMap::new()).unwrap().daemon_binary, None);
+
+        let arguments = program_status_relay_arguments("/tmp/socket", &["%1", "%2"]);
+        assert_eq!(arguments[..2], ["-S", "/tmp/socket"]);
+        let commands: Vec<&String> =
+            arguments.iter().filter(|argument| argument.starts_with("pipe-pane")).collect();
+        assert_eq!(commands.len(), 2);
+        assert!(commands[0].contains("exec #{q:@agent_daemon_binary} program-status-relay"));
+        assert!(!arguments.iter().any(|argument| argument == "set-option"));
+    }
+
+    #[test]
+    fn missing_relay_binary_is_reported_without_attaching() {
+        // Config::test has no daemon binary; attachment must fail before any
+        // tmux fork and record a distinct, visible error.
+        let mut state = center();
+        let resolved = vec![(program_pane("%1", false, false), "pi".to_string())];
+        state.attach_program_status_relays(&resolved);
+        assert_eq!(
+            state.relay_attach_error.as_deref(),
+            Some("program status relay requires @agent_daemon_binary")
+        );
+        state.record_relay_attach_result(Ok(()));
+        assert!(state.relay_attach_error.is_none());
+    }
+
+    #[test]
+    fn a_withdrawn_report_from_a_replaced_relay_restores_screen_capture() {
+        let mut state = center();
+        state.apply(program_status(ProgramState::Working, None)).unwrap();
+        // The replacement pipe keeps pane_pipe set, so pruning keeps the report.
+        let still_piped = vec![(program_pane("%1", false, true), "pi".to_string())];
+        state.prune_program_statuses(&still_piped);
+        assert!(state.has_program_status("%1", "pi"));
+        // The old relay's final clear removes it and the pane is captured again.
+        state.apply(program_status(ProgramState::Clear, None)).unwrap();
+        assert!(!state.has_program_status("%1", "pi"));
+        let program_panes = HashSet::new();
+        let (_, dirty_panes) = state.select_dirty_panes(&still_piped, &program_panes, true, 100);
+        assert_eq!(dirty_panes, vec!["%1".to_string()]);
+    }
+
+    #[test]
     fn relay_attachment_never_replaces_an_existing_pipe_on_real_tmux() {
         let server = IsolatedTmuxServer::start("program-relay");
         let directory = server.socket_path.parent().unwrap().join("relay dir#'x");
@@ -265,8 +333,9 @@
         let user_command = format!("cat > '{}'", user_pipe.display());
         server.run(&["pipe-pane", "-O", "-t", &user_pane, &user_command]);
 
+        server.run(&["set-option", "-g", "@agent_daemon_binary", relay.to_str().unwrap()]);
         let arguments =
-            program_status_relay_arguments(server.socket(), &relay, &[&relayed_pane, &user_pane]);
+            program_status_relay_arguments(server.socket(), &[&relayed_pane, &user_pane]);
         let output = Command::new("tmux").args(&arguments).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 

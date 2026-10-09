@@ -32,6 +32,7 @@ impl StateCenter {
             published_exposure_payload: None,
             published_file_path: None,
             exposure_publish_error: None,
+            relay_attach_error: None,
             source_publisher: None,
             capture_marker: format!("--tmux-argos-daemon-split-{nanos:016x}--"),
         }

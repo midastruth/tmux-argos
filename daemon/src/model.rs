@@ -48,6 +48,10 @@ pub struct Config {
     pub screen_full_scan_interval: Duration,
     pub state_ttl: Duration,
     pub program_status_enabled: bool,
+    /// Stable plugin-published daemon path that relays execute. The running
+    /// daemon's own executable path is not stable: rebuilding it in place makes
+    /// Linux report a deleted path.
+    pub daemon_binary: Option<PathBuf>,
     pub detect_commands: HashSet<String>,
     pub wrapper_commands: HashSet<String>,
     pub state_exposure: ExposureMode,
@@ -168,6 +172,10 @@ impl Config {
             screen_full_scan_interval: Duration::from_millis(full_scan_ms),
             state_ttl: Duration::from_secs(ttl),
             program_status_enabled: config_value(values, "@agent_program_status", "on") == "on",
+            daemon_binary: values
+                .get("@agent_daemon_binary")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
             detect_commands: word_set(&config_value(
                 values,
                 "@agent_detect_commands",
@@ -202,6 +210,7 @@ impl Config {
             screen_full_scan_interval: Duration::from_secs(30),
             state_ttl: Duration::from_secs(60),
             program_status_enabled: true,
+            daemon_binary: None,
             detect_commands: word_set("pi codex claude"),
             wrapper_commands: word_set("node bun npx npm pnpm yarn"),
             state_exposure: ExposureMode::Off,
@@ -335,6 +344,7 @@ pub struct StateCenter {
     published_exposure_payload: Option<String>,
     published_file_path: Option<PathBuf>,
     exposure_publish_error: Option<String>,
+    relay_attach_error: Option<String>,
     source_publisher: Option<SourcePublisher>,
     capture_marker: String,
 }

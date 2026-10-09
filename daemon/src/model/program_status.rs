@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 
 /// Latest top-level OSC 7501 report relayed from one pane. `Clear` is never
 /// stored: it withdraws the report so the pane falls back to screen detection.
@@ -58,38 +57,59 @@ fn program_display_state(
 
 /// Builds one tmux invocation that attaches the relay to every listed pane.
 /// `if-shell -F` re-checks `pane_pipe` inside tmux's command queue, so a pipe
-/// opened after the pane listing is never replaced. The binary path is stored
-/// as a verbatim option value and expanded with `#{q:}`, so no path byte is
-/// parsed by tmux or the shell.
-fn program_status_relay_arguments(
-    server_socket: &str,
-    relay_binary: &Path,
-    pane_ids: &[&str],
-) -> Vec<OsString> {
-    let mut arguments: Vec<OsString> = vec![
-        "-S".into(),
-        server_socket.into(),
-        "set-option".into(),
-        "-g".into(),
-        "@agent_program_status_relay_binary".into(),
-        relay_binary.as_os_str().to_os_string(),
-    ];
-    for pane_id in pane_ids {
+/// opened after the pane listing is never replaced. The relay executes the
+/// plugin-published `@agent_daemon_binary`, expanded with `#{q:}`, so no path
+/// byte is parsed by tmux or the shell and an in-place rebuild keeps working.
+fn program_status_relay_arguments(server_socket: &str, pane_ids: &[&str]) -> Vec<String> {
+    let mut arguments: Vec<String> = vec!["-S".into(), server_socket.into()];
+    for (index, pane_id) in pane_ids.iter().enumerate() {
+        if index > 0 {
+            arguments.push(";".into());
+        }
         let relay_command = format!(
             "pipe-pane -O -t {pane_id} \"TMUX=#{{q:socket_path}},#{{pid}},0 exec \
-             #{{q:@agent_program_status_relay_binary}} program-status-relay #{{pane_id}}\""
+             #{{q:@agent_daemon_binary}} program-status-relay #{{pane_id}}\""
         );
         arguments.extend([
-            ";".into(),
             "if-shell".into(),
             "-F".into(),
             "-t".into(),
             (*pane_id).into(),
             "#{?pane_pipe,,1}".into(),
-            relay_command.into(),
+            relay_command,
         ]);
     }
     arguments
+}
+
+/// A relay that cannot exec closes its pipe at once, so attaching it anyway
+/// would fork tmux and a shell for every Pi pane on every scan.
+fn validate_relay_binary(daemon_binary: Option<&Path>) -> Result<(), String> {
+    let path = daemon_binary.ok_or("program status relay requires @agent_daemon_binary")?;
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!("program status relay binary {} is unavailable: {error}", path.display())
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "program status relay binary {} is not an executable file",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn run_relay_attachment(arguments: &[String]) -> Result<(), String> {
+    let output = Command::new("tmux")
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("program status relay attachment failed to run tmux: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "program status relay attachment failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 impl StateCenter {
@@ -142,7 +162,7 @@ impl StateCenter {
             .retain(|pane_id, _| reporting_panes.contains(pane_id.as_str()));
     }
 
-    fn attach_program_status_relays(&self, resolved: &[(PaneRow, String)]) {
+    fn attach_program_status_relays(&mut self, resolved: &[(PaneRow, String)]) {
         if !self.config.program_status_enabled {
             return;
         }
@@ -154,14 +174,24 @@ impl StateCenter {
         if pane_ids.is_empty() {
             return;
         }
-        let Ok(relay_binary) = std::env::current_exe() else {
-            return;
-        };
-        let arguments =
-            program_status_relay_arguments(&self.server_socket, &relay_binary, &pane_ids);
-        // A failed attachment leaves pane_pipe unset, so the next scan retries
-        // once per screen interval while screen detection stays in effect.
-        let _ = Command::new("tmux").args(arguments).output();
+        let result = validate_relay_binary(self.config.daemon_binary.as_deref()).and_then(|()| {
+            run_relay_attachment(&program_status_relay_arguments(&self.server_socket, &pane_ids))
+        });
+        self.record_relay_attach_result(result);
+    }
+
+    /// Screen detection keeps working while relays are unavailable, so the
+    /// failure is reported once per distinct cause instead of on every scan.
+    fn record_relay_attach_result(&mut self, result: Result<(), String>) {
+        match result {
+            Ok(()) => self.relay_attach_error = None,
+            Err(error) => {
+                if self.relay_attach_error.as_ref() != Some(&error) {
+                    eprintln!("tmux-argos-state-daemon: {error}");
+                }
+                self.relay_attach_error = Some(error);
+            }
+        }
     }
 
     fn apply_program_detection(&mut self, row: PaneRow, tool: String) {

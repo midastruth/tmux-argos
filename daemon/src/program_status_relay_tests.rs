@@ -3,9 +3,13 @@ fn scan_all(bytes: &[u8]) -> Vec<Vec<u8>> {
     bytes.iter().filter_map(|byte| scanner.push(*byte)).collect()
 }
 
+/// Relays `bytes`, checks the mandatory final withdrawal, and returns the
+/// reports forwarded before it.
 fn relayed(bytes: &[u8]) -> Vec<Request> {
     let mut requests = Vec::new();
     relay("%7", bytes, |request| requests.push(request)).unwrap();
+    let last = requests.pop().expect("a relay always withdraws its report");
+    assert_eq!(status_of(&last), (None, ProgramState::Clear, None));
     requests
 }
 
@@ -137,8 +141,30 @@ impl Read for FailingReader {
 }
 
 #[test]
-fn relay_reports_read_errors_instead_of_spinning() {
-    assert!(relay("%7", FailingReader, |_| {}).is_err());
+fn relay_reports_read_errors_after_withdrawing_its_report() {
+    let mut requests = Vec::new();
+    assert!(relay("%7", FailingReader, |request| requests.push(request)).is_err());
+    let statuses: Vec<_> = requests.iter().map(status_of).collect();
+    assert_eq!(statuses, vec![(None, ProgramState::Clear, None)]);
+}
+
+#[test]
+fn replaced_or_closed_relay_stream_withdraws_the_last_report() {
+    // A user pipe-pane replaces the relay by closing its stdin while keeping
+    // pane_pipe set; the final clear is the daemon's only signal.
+    let mut requests = Vec::new();
+    relay("%7", &b"\x1b]7501;state=working:app=pi\x07"[..], |request| {
+        requests.push(request)
+    })
+    .unwrap();
+    let statuses: Vec<_> = requests.iter().map(status_of).collect();
+    assert_eq!(
+        statuses,
+        vec![
+            (Some("pi"), ProgramState::Working, None),
+            (None, ProgramState::Clear, None),
+        ]
+    );
 }
 
 #[test]
@@ -179,5 +205,6 @@ fn relay_retries_interrupted_reads() {
     };
     let mut requests = Vec::new();
     relay("%7", reader, |request| requests.push(request)).unwrap();
-    assert_eq!(requests.len(), 1);
+    let states: Vec<_> = requests.iter().map(|request| status_of(request).1).collect();
+    assert_eq!(states, vec![ProgramState::Working, ProgramState::Clear]);
 }

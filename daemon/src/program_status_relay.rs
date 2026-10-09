@@ -183,7 +183,27 @@ pub fn program_status_request(pane_id: &str, osc_body: &[u8]) -> Option<Request>
 /// Reads `input` until end of stream and passes each status request to `send`.
 /// Delivery failures are left to the caller: the next report carries the full
 /// state again, so a dropped report is corrected without replay.
-pub fn relay(pane_id: &str, mut input: impl Read, mut send: impl FnMut(Request)) -> io::Result<()> {
+///
+/// The stream ends when the pane closes or another `pipe-pane` command replaces
+/// this relay. A replacement pipe keeps `pane_pipe` set, so the daemon cannot
+/// notice the lost relay itself; the relay therefore always withdraws its
+/// pane's report with `clear` before returning, including after a read error.
+pub fn relay(pane_id: &str, input: impl Read, mut send: impl FnMut(Request)) -> io::Result<()> {
+    let result = forward_reports(pane_id, input, &mut send);
+    send(Request::ProgramStatus {
+        pane_id: pane_id.to_string(),
+        app: None,
+        state: ProgramState::Clear,
+        kind: None,
+    });
+    result
+}
+
+fn forward_reports(
+    pane_id: &str,
+    mut input: impl Read,
+    send: &mut impl FnMut(Request),
+) -> io::Result<()> {
     let mut scanner = OscScanner::new();
     let mut buffer = [0u8; 4096];
     loop {

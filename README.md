@@ -320,10 +320,14 @@ tmux discards these sequences, so the daemon reads them before tmux does:
   Pi's device-attributes query first, so Pi never enables reporting on its own.
   Only Pi processes started after the plugin loads inherit the variable.
 - For each detected Pi pane without a pipe (`#{pane_pipe}` is `0`), the daemon
-  runs `tmux pipe-pane -O` with its own `program-status-relay` command. The
-  check runs inside tmux's command queue with `if-shell -F`, so an existing or
-  concurrently opened pipe is never replaced. tmux allows one pipe per pane:
-  while you pipe a Pi pane elsewhere, that pane uses screen detection.
+  runs `tmux pipe-pane -O` with `@agent_daemon_binary program-status-relay`.
+  The relay runs the plugin-published binary path rather than the running
+  daemon's executable, so rebuilding the daemon in place does not break new
+  relays. A missing or non-executable binary, or a failed tmux attachment, is
+  reported on the daemon's stderr once per distinct cause and skips attachment.
+  The pipe check runs inside tmux's command queue with `if-shell -F`, so an
+  existing or concurrently opened pipe is never replaced. tmux allows one pipe
+  per pane: while you pipe a Pi pane elsewhere, that pane uses screen detection.
 - The relay forwards only top-level `state`, `app`, and `kind` fields over the
   daemon socket. Messages (`msg`), sub-task records (`id=`), and support queries
   are ignored; other pane output is never forwarded.
@@ -340,13 +344,17 @@ replaces `capture-pane` for that pane:
 | `clear` | report removed; screen detection resumes |
 
 A report applies immediately rather than after the next screen interval and
-needs no redraw confirmation. When the relay exits, tmux clears `pane_pipe`; the
-daemon then drops the report, falls back to screen detection, and attaches a
-new relay on a later scan. Claude Code and Codex keep using screen detection:
+needs no redraw confirmation. When its output stream ends or fails — the pane
+closes, or your own `pipe-pane` command replaces it — the relay sends `clear`
+before exiting, so the pane falls back to screen detection. If the relay dies
+without sending it, tmux clears `pane_pipe`; the daemon then drops the report
+and attaches a new relay on a later scan. Claude Code and Codex keep using screen detection:
 inside tmux, Claude only reports after the same unanswerable support query, and
 Codex does not implement the protocol. Set `@agent_program_status off` to
-disable forced reporting, relays, and report handling; already attached relays
-keep running until their Pi exits.
+disable forced reporting, relays, and report handling. A relay belongs to the
+pane, not to the Pi process: an attached relay keeps the pane's only pipe slot,
+including after Pi exits to a shell, until the pane closes or you replace its
+pipe with `pipe-pane`.
 
 ### Structured state exposure
 
