@@ -16,11 +16,11 @@ fn exposure_config(
     if !mode.file_enabled() {
         return Ok((mode, None));
     }
-    let configured = config_value(
-        values,
-        "@agent_state_file",
-        "~/.cache/tmux-argos/state.json",
-    );
+    let configured = config_value(values, "@agent_state_file", "");
+    if configured.is_empty() {
+        // The default requires the server identity supplied by Config::load.
+        return Ok((mode, None));
+    }
     let path = expand_state_file(&configured)?;
     Ok((mode, Some(path)))
 }

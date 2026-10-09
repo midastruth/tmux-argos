@@ -51,6 +51,7 @@ pub struct Config {
     pub wrapper_commands: HashSet<String>,
     pub state_exposure: ExposureMode,
     pub state_file: Option<PathBuf>,
+    server_hash: Option<String>,
 }
 
 fn config_value(values: &HashMap<String, String>, name: &str, default: &str) -> String {
@@ -126,7 +127,7 @@ fn config_intervals(values: &HashMap<String, String>) -> Result<(u64, u64, u64),
 }
 
 impl Config {
-    pub fn load(server_socket: &str) -> Result<Self, String> {
+    pub fn load(server_socket: &str, server_hash: &str) -> Result<Self, String> {
         let output = tmux_output(server_socket, &["show-options", "-g"])
             .ok_or("failed to read tmux global options")?;
         let mut values = HashMap::new();
@@ -135,7 +136,13 @@ impl Config {
                 values.insert(name.to_string(), decode_tmux_value(value));
             }
         }
-        Self::from_values(&values)
+        let mut config = Self::from_values(&values)?;
+        config.server_hash = Some(server_hash.to_string());
+        if config.state_exposure.file_enabled() && config.state_file.is_none() {
+            let default_file = format!("~/.cache/tmux-argos/{server_hash}/state.json");
+            config.state_file = Some(expand_state_file(&default_file)?);
+        }
+        Ok(config)
     }
 
     fn from_values(values: &HashMap<String, String>) -> Result<Self, String> {
@@ -171,6 +178,7 @@ impl Config {
             )),
             state_exposure,
             state_file,
+            server_hash: None,
         })
     }
 
@@ -195,6 +203,7 @@ impl Config {
             wrapper_commands: word_set("node bun npx npm pnpm yarn"),
             state_exposure: ExposureMode::Off,
             state_file: None,
+            server_hash: None,
         }
     }
 }

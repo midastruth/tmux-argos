@@ -94,6 +94,17 @@ impl StateCenter {
         );
     }
 
+    pub fn reload_config(&mut self) -> Result<(), String> {
+        let server_hash = self
+            .config
+            .server_hash
+            .as_deref()
+            .ok_or("configuration has no tmux server identity")?;
+        let config = Config::load(&self.server_socket, server_hash)?;
+        self.replace_config(config);
+        Ok(())
+    }
+
     pub fn replace_config(&mut self, config: Config) {
         self.prepare_exposure_config_replacement(&config);
         self.config = config;

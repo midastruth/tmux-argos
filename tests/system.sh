@@ -139,6 +139,12 @@ if ! cargo build --release --manifest-path "$ROOT/daemon/Cargo.toml" >/dev/null;
 fi
 pass 'release daemon builds for system tests'
 
+if ! python3 "$ROOT/tests/state_file_isolation.py" "$BINARY"; then
+  fail 'state files remain isolated across real tmux servers'
+  exit 1
+fi
+pass 'state files remain isolated across real tmux servers'
+
 tmux -L "$SOCKET_NAME" -f /dev/null new-session -d -s work 'sleep 300'
 TMUX_SOCKET="$(tmux -L "$SOCKET_NAME" display-message -p '#{socket_path}')"
 TMUX_SERVER_PID="$(tmux -L "$SOCKET_NAME" display-message -p '#{pid}')"

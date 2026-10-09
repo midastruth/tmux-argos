@@ -35,6 +35,36 @@
     }
 
     #[test]
+    fn file_exposure_is_enabled_only_for_file_and_both() {
+        for (mode, expected) in [
+            (ExposureMode::Off, false),
+            (ExposureMode::Socket, false),
+            (ExposureMode::File, true),
+            (ExposureMode::Both, true),
+        ] {
+            assert_eq!(mode.file_enabled(), expected);
+        }
+    }
+
+    #[test]
+    fn config_load_preserves_custom_paths_and_disabled_file_exposure() {
+        let server = IsolatedTmuxServer::start("exposure-config");
+        let path = "/tmp/argos-custom-state.json";
+        server.run(&["set-option", "-g", "@agent_state_file", path]);
+
+        for (mode, expected) in [
+            ("off", None),
+            ("socket", None),
+            ("file", Some(PathBuf::from(path))),
+            ("both", Some(PathBuf::from(path))),
+        ] {
+            server.run(&["set-option", "-g", "@agent_state_exposure", mode]);
+            let config = Config::load(server.socket(), "0123456789abcdef").unwrap();
+            assert_eq!(config.state_file, expected);
+        }
+    }
+
+    #[test]
     fn state_exposure_defaults_both_and_validates_modes_and_file_paths() {
         let default = Config::from_values(&HashMap::new()).unwrap();
         assert_eq!(default.state_exposure, ExposureMode::Both);

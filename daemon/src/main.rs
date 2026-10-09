@@ -128,6 +128,7 @@ fn print_response(response: Response) -> Result<(), String> {
 struct RuntimePaths {
     socket: PathBuf,
     lock: PathBuf,
+    server_hash: String,
 }
 
 struct TmuxServerInfo {
@@ -171,6 +172,7 @@ fn runtime_paths(server: &TmuxServerInfo) -> Result<RuntimePaths, String> {
     Ok(RuntimePaths {
         socket: root.join(format!("{stem}.sock")),
         lock: root.join(format!("{stem}.lock")),
+        server_hash: stem,
     })
 }
 
@@ -228,8 +230,8 @@ fn serve(paths: &RuntimePaths, server: &TmuxServerInfo) -> Result<(), String> {
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))
         .map_err(|e| e.to_string())?;
 
-    let config =
-        Config::load(&server.socket).map_err(|e| format!("invalid initial config: {e}"))?;
+    let config = Config::load(&server.socket, &paths.server_hash)
+        .map_err(|e| format!("invalid initial config: {e}"))?;
     let (sender, receiver) = mpsc::sync_channel::<Incoming>(256);
     spawn_acceptor(listener, sender)?;
     let mut center = StateCenter::new(server.socket.clone(), config);
@@ -354,11 +356,8 @@ fn inspect_response(center: &StateCenter) -> Response {
 }
 
 fn reload_response(center: &mut StateCenter) -> Response {
-    match Config::load(&center.server_socket) {
-        Ok(config) => {
-            center.replace_config(config);
-            Response::ok(None)
-        }
+    match center.reload_config() {
+        Ok(()) => Response::ok(None),
         Err(error) => Response::error(error),
     }
 }

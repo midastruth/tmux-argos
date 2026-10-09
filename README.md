@@ -315,8 +315,19 @@ Choose a single exposure method or disable both when needed:
 
 ```tmux
 set -g @agent_state_exposure 'both' # off, file, socket, or both
-set -g @agent_state_file '~/.cache/tmux-argos/state.json'
+set -g @agent_state_file '' # empty or unset selects the per-server default
 ```
+
+The default file is `~/.cache/tmux-argos/<server_hash>/state.json`. The hash
+uses the tmux socket path and server PID, exactly like the daemon's private
+socket and lock names. Independent servers therefore publish independent files;
+restarting a daemon for the same server retains its path, while restarting the
+tmux server changes its identity and default path.
+
+To give file consumers a known location, set `@agent_state_file` to an absolute
+path (a leading `~/` is expanded). Each server must use a different custom path:
+explicitly configuring the same file on two servers allows them to overwrite
+or delete each other's snapshots. Custom paths are not automatically namespaced.
 
 File mode is intended for agents and external monitoring processes. The daemon
 writes only when topology or agent state changes, creates a missing destination
@@ -403,13 +414,18 @@ have never been presented this way have a null `popupHost` and false
 working-to-idle transition may take up to
 700ms longer for redraw confirmation.
 
-For example, an agent can inspect existing peers at startup (the following
-example uses optional `jq`):
+For example, after configuring a unique known file location for this server,
+an agent can inspect existing peers at startup (the following uses optional `jq`):
 
 ```sh
+state_file='/absolute/path/this-server/state.json' # the configured @agent_state_file
 jq '.panes[] | select(.agent != null) | {paneId, agent, activity, agentState}' \
-  ~/.cache/tmux-argos/state.json
+  "$state_file"
 ```
+
+Consumers running inside the desired tmux server can instead avoid file-path
+lookup and use `scripts/daemon.sh inspect`, reading `.data.panes` from its
+protocol envelope.
 
 Disabling file exposure, changing its path, or cleanly shutting down the daemon
 removes the file published by that daemon. Invalid exposure modes, or relative
@@ -569,7 +585,7 @@ set -g @agent_screen_interval_ms           '1000'
 set -g @agent_screen_full_scan_interval_ms '30000'
 set -g @agent_state_ttl                    '259200'
 set -g @agent_state_exposure               'both'
-set -g @agent_state_file '~/.cache/tmux-argos/state.json'
+set -g @agent_state_file '' # default: ~/.cache/tmux-argos/<server_hash>/state.json
 set -g @agent_daemon_binary '/path/to/daemon/target/release/tmux-argos-state-daemon'
 ```
 
