@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const REJECT_OPTION = "Reject (default)";
 const ALLOW_ONCE_OPTION = "Allow this mutation once";
+const ALLOW_SESSION_OPTION = "Allow for this session";
 const tests = [];
 
 function test(name, run) {
@@ -51,7 +52,7 @@ test("protected capability write is allowed only after one-time approval", async
 
   assert.equal(result, undefined);
   assert.equal(prompts.length, 1);
-  assert.deepEqual(prompts[0].options, [REJECT_OPTION, ALLOW_ONCE_OPTION]);
+  assert.deepEqual(prompts[0].options, [REJECT_OPTION, ALLOW_ONCE_OPTION, ALLOW_SESSION_OPTION]);
   assert.match(prompts[0].title, /write/);
   assert.match(prompts[0].title, /tests\/bash_mutation\.sh/);
 });
@@ -119,6 +120,44 @@ test("behavior-test shell refactoring proceeds without human approval", async ()
 test("production mutation proceeds without asking for human approval", async () => {
   const { context, prompts } = createContext({ selection: REJECT_OPTION });
   const result = await invoke("edit", { path: "scripts/helpers.sh", edits: [] }, context);
+
+  assert.equal(result, undefined);
+  assert.equal(prompts.length, 0);
+});
+
+test("session approval allows subsequent protected mutations without prompt", async () => {
+  const { context, prompts } = createContext({ selection: ALLOW_SESSION_OPTION });
+  const firstResult = await invoke("write", { path: "tests/suite_contract.py", content: "x" }, context);
+  assert.equal(firstResult, undefined);
+  assert.equal(prompts.length, 1);
+
+  const secondResult = await invoke("edit", { path: "AGENTS.md", edits: [] }, context);
+  assert.equal(secondResult, undefined);
+  assert.equal(prompts.length, 1);
+});
+
+test("read-only interpreter execution of protected scripts proceeds without human approval", async () => {
+  const command = "python3 tests/suite_contract.py";
+  const { context, prompts } = createContext({ selection: REJECT_OPTION });
+  const result = await invoke("bash", { command }, context);
+
+  assert.equal(result, undefined);
+  assert.equal(prompts.length, 0);
+});
+
+test("redirecting protected command output to non-protected file proceeds without human approval", async () => {
+  const command = "bash tests/verify.sh > /tmp/verify.log 2>&1";
+  const { context, prompts } = createContext({ selection: REJECT_OPTION });
+  const result = await invoke("bash", { command }, context);
+
+  assert.equal(result, undefined);
+  assert.equal(prompts.length, 0);
+});
+
+test("commands with word containing spec substring proceed without human approval", async () => {
+  const command = "git commit -m 'inspect special cases'";
+  const { context, prompts } = createContext({ selection: REJECT_OPTION });
+  const result = await invoke("bash", { command }, context);
 
   assert.equal(result, undefined);
   assert.equal(prompts.length, 0);
