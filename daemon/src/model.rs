@@ -325,10 +325,12 @@ pub struct StateCenter {
     published_exposure_payload: Option<String>,
     published_file_path: Option<PathBuf>,
     exposure_publish_error: Option<String>,
+    source_publisher: Option<SourcePublisher>,
     capture_marker: String,
 }
 
 include!("model/state_exposure.rs");
+include!("model/state_source.rs");
 include!("model/state_events.rs");
 include!("model/state_scan.rs");
 include!("model/state_output.rs");
@@ -343,6 +345,7 @@ mod tests {
     include!("model/tests_config.rs");
     include!("model/tests_state.rs");
     include!("model/tests_exposure.rs");
+    include!("model/tests_source.rs");
     include!("model/tests_detection.rs");
     include!("model/tests_screen_io.rs");
 }

@@ -31,6 +31,7 @@ impl StateCenter {
             published_exposure_payload: None,
             published_file_path: None,
             exposure_publish_error: None,
+            source_publisher: None,
             capture_marker: format!("--tmux-argos-daemon-split-{nanos:016x}--"),
         }
     }
@@ -168,6 +169,11 @@ impl StateCenter {
     }
 
     pub fn apply(&mut self, request: Request) -> Result<(), String> {
+        // A delayed Seen/report may reach the old PID-scoped daemon after the
+        // socket has been reused. Reject it before mutating authoritative state.
+        if let Some(publisher) = &self.source_publisher {
+            publisher.validate_server()?;
+        }
         let now = Instant::now();
         self.prune_retired_generations(now);
         match request {

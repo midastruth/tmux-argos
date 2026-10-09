@@ -77,6 +77,14 @@ fn write_and_replace(temporary: &Path, path: &Path, contents: &[u8]) -> Result<(
     fs::rename(temporary, path).map_err(|error| error.to_string())
 }
 
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 impl StateCenter {
     fn pane_agent_record(&self, pane_id: &str) -> Option<&AgentRecord> {
         self.agents
@@ -166,11 +174,16 @@ impl StateCenter {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        json!({
+        let mut snapshot = json!({
             "schemaVersion": 2,
             "generatedAt": generated_at,
             "panes": panes
-        })
+        });
+        if let Some(publisher) = &self.source_publisher {
+            snapshot["serverSocket"] = json!(publisher.descriptor.server_socket);
+            snapshot["serverPid"] = json!(publisher.descriptor.server_pid);
+        }
+        snapshot
     }
 
     pub fn inspect(&self) -> Result<Value, String> {
@@ -199,6 +212,10 @@ impl StateCenter {
         let mut output = serde_json::to_vec(&self.exposure_snapshot_from(panes))
             .map_err(|error| error.to_string())?;
         output.push(b'\n');
+        let _ownership_lock = match &self.source_publisher {
+            Some(publisher) => Some(publisher.current_server_lock()?),
+            None => None,
+        };
         atomic_write_private(&path, &output)?;
         self.published_exposure_payload = Some(payload);
         self.published_file_path = Some(path);
@@ -206,11 +223,11 @@ impl StateCenter {
     }
 
     fn reconcile_exposure(&mut self) {
-        match self.publish_exposure_file() {
-            Ok(_) => self.exposure_publish_error = None,
+        match self.publish_state_and_source() {
+            Ok(()) => self.exposure_publish_error = None,
             Err(error) => {
                 if self.exposure_publish_error.as_ref() != Some(&error) {
-                    eprintln!("tmux-argos-state-daemon: state file exposure failed: {error}");
+                    eprintln!("tmux-argos-state-daemon: file publication failed: {error}");
                 }
                 self.exposure_publish_error = Some(error);
             }
@@ -219,10 +236,33 @@ impl StateCenter {
 
     pub fn remove_exposure_file(&mut self) {
         if let Some(path) = self.published_file_path.take() {
-            let _ = fs::remove_file(path);
+            if let Err(error) = self.remove_owned_snapshot(&path) {
+                eprintln!("tmux-argos-state-daemon: state cleanup failed: {error}");
+            }
         }
         self.published_exposure_payload = None;
         self.exposure_publish_error = None;
+    }
+
+    fn remove_owned_snapshot(&self, path: &Path) -> Result<(), String> {
+        let _ownership_lock = match &self.source_publisher {
+            Some(publisher) => {
+                let lock = publisher.lock()?;
+                let Some(contents) = read_optional_file(path)? else {
+                    return Ok(());
+                };
+                if !publisher.snapshot_is_owned(&contents)? {
+                    return Ok(());
+                }
+                Some(lock)
+            }
+            None => None,
+        };
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     fn prepare_exposure_config_replacement(&mut self, next: &Config) {

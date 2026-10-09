@@ -235,10 +235,12 @@ fn serve(paths: &RuntimePaths, server: &TmuxServerInfo) -> Result<(), String> {
     let (sender, receiver) = mpsc::sync_channel::<Incoming>(256);
     spawn_acceptor(listener, sender)?;
     let mut center = StateCenter::new(server.socket.clone(), config);
+    center.enable_source_publication(server.pid)?;
     center.restore_once();
     reconcile_center(&mut center);
     event_loop(&receiver, &mut center, server.pid);
     center.remove_exposure_file();
+    center.remove_source_file();
     let _ = fs::remove_file(&paths.socket);
     Ok(())
 }

@@ -324,8 +324,42 @@ socket and lock names. Independent servers therefore publish independent files;
 restarting a daemon for the same server retains its path, while restarting the
 tmux server changes its identity and default path.
 
-To give file consumers a known location, set `@agent_state_file` to an absolute
-path (a leading `~/` is expanded). Each server must use a different custom path:
+File consumers locate the current snapshot through a stable source descriptor:
+`~/.cache/tmux-argos/sources/<socket_hash>.json`. `socket_hash` is the lowercase,
+16-digit FNV-1a64 hash of the socket path's UTF-8 bytes (offset
+`0xcbf29ce484222325`, prime `0x100000001b3`, arithmetic modulo 2^64).
+Unlike `server_hash`, it does **not** contain the PID. No periodic tmux or daemon
+query is needed to resolve the state file:
+
+```json
+{
+  "serverSocket": "/tmp/tmux-1000/default",
+  "serverPid": 3627,
+  "stateFile": "/home/midas/.cache/tmux-argos/a607d39dc54b006e/state.json"
+}
+```
+
+The daemon publishes the descriptor atomically with mode `0600` in a private
+`0700` directory, even in `off`/`socket` modes; those modes publish
+`"stateFile": null`. Reload updates the descriptor after the new snapshot has
+been written. Invalid configuration retains the previous valid source.
+Publication and cleanup share a socket-scoped `.lock` file that is never
+unlinked. Under this lock, publication validates the live server PID and cleanup
+checks the recorded owner. An old daemon cannot overwrite or remove a replacement
+server's descriptor or its snapshot at a reused custom path.
+
+Consumers select one exact configured socket path, watch its descriptor and then
+its state file, and clear rows whenever the socket, PID or state path changes or
+the source becomes unavailable. Snapshot `serverSocket`/`serverPid` must match
+the captured descriptor before rows are accepted. Row operations use `tmux -S`
+with that socket and reject a changed PID or missing `%pane`/`$session` ID;
+never fall back to a reusable session name or pane index. PID checks for mutations
+must run in the same tmux command queue as the operation, not just in a prior
+subprocess. A descriptor is last-known data, not a process-liveness probe: an
+abrupt daemon crash can leave files until a subsequent daemon updates them.
+
+Optionally set `@agent_state_file` to an absolute path (a leading `~/` is
+expanded). Each distinct socket must use a different custom path:
 explicitly configuring the same file on two servers allows them to overwrite
 or delete each other's snapshots. Custom paths are not automatically namespaced.
 
@@ -360,6 +394,8 @@ per pane, so every tmux session and window is represented without three separate
 ```json
 {
   "schemaVersion": 2,
+  "serverSocket": "/tmp/tmux-1000/default",
+  "serverPid": 3627,
   "generatedAt": 1741000000,
   "panes": [
     {
@@ -427,8 +463,9 @@ Consumers running inside the desired tmux server can instead avoid file-path
 lookup and use `scripts/daemon.sh inspect`, reading `.data.panes` from its
 protocol envelope.
 
-Disabling file exposure, changing its path, or cleanly shutting down the daemon
-removes the file published by that daemon. Invalid exposure modes, or relative
+Disabling file exposure or changing its path removes the snapshot owned by that
+daemon. Clean shutdown additionally removes its source descriptor, but never
+files owned by a replacement server. Invalid exposure modes, or relative
 file paths in `file`/`both` modes, reject a config reload and leave the previous
 valid configuration active.
 
