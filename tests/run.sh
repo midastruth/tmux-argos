@@ -921,6 +921,18 @@ assert_not_contains 'entrypoint status fragments perform zero forks' "$log_conte
 assert_contains 'entrypoint ensures and reloads daemon' "$log_contents" 'daemon.sh ensure'
 
 reset_mocks
+run_entrypoint >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'entrypoint forces Pi OSC 7501 reporting that tmux cannot negotiate' "$log_contents" $'set-environment\t-g\tPI_PROGRAM_STATUS\t1'
+
+reset_mocks
+TMUX_MOCK_OPTIONS=$'@agent_program_status=off'
+run_entrypoint >/dev/null
+log_contents="$(<"$TMUX_LOG")"
+assert_contains 'entrypoint removes forced Pi reporting when program status is disabled' "$log_contents" $'set-environment\t-gu\tPI_PROGRAM_STATUS'
+assert_not_contains 'entrypoint does not force Pi reporting when program status is disabled' "$log_contents" $'set-environment\t-g\tPI_PROGRAM_STATUS\t1'
+
+reset_mocks
 TMUX_MOCK_SHOW_HOOKS=$'after-kill-pane\nsession-closed'
 run_entrypoint >/dev/null
 log_contents="$(<"$TMUX_LOG")"

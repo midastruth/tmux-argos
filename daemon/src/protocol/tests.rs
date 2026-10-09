@@ -262,3 +262,55 @@
             "the mutation corpus must exercise validation"
         );
     }
+
+    fn program_status(app: Option<&str>, state: ProgramState, kind: Option<BlockedKind>) -> Request {
+        Request::ProgramStatus {
+            pane_id: "%1".into(),
+            app: app.map(str::to_string),
+            state,
+            kind,
+        }
+    }
+
+    #[test]
+    fn program_status_round_trips_with_lowercase_states_and_kinds() {
+        let request = program_status(Some("pi"), ProgramState::Blocked, Some(BlockedKind::Auth));
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains(r#""state":"blocked""#));
+        assert!(encoded.contains(r#""kind":"auth""#));
+        let decoded: Request = serde_json::from_str(&encoded).unwrap();
+        assert!(validate_request(&decoded).is_ok());
+    }
+
+    #[test]
+    fn program_status_validates_pane_app_and_kind_boundaries() {
+        assert!(validate_request(&program_status(None, ProgramState::Clear, None)).is_ok());
+        let longest_app = "a.b+c_d-".repeat(4);
+        assert_eq!(longest_app.len(), MAX_PROGRAM_APP_BYTES);
+        assert!(validate_request(&program_status(Some(&longest_app), ProgramState::Idle, None)).is_ok());
+        let too_long = format!("{longest_app}x");
+        assert!(validate_request(&program_status(Some(&too_long), ProgramState::Idle, None)).is_err());
+        for invalid_app in ["", "pi app", "pi/app", "pi:app", "π"] {
+            let request = program_status(Some(invalid_app), ProgramState::Idle, None);
+            assert!(validate_request(&request).is_err(), "app {invalid_app:?}");
+        }
+        for state in [
+            ProgramState::Idle,
+            ProgramState::Working,
+            ProgramState::Done,
+            ProgramState::Error,
+            ProgramState::Clear,
+        ] {
+            let misplaced = program_status(None, state, Some(BlockedKind::Question));
+            assert!(validate_request(&misplaced).is_err(), "{state:?}");
+        }
+        let blocked = program_status(None, ProgramState::Blocked, Some(BlockedKind::Permission));
+        assert!(validate_request(&blocked).is_ok());
+        let bad_pane = Request::ProgramStatus {
+            pane_id: "%".into(),
+            app: None,
+            state: ProgramState::Idle,
+            kind: None,
+        };
+        assert!(validate_request(&bad_pane).is_err());
+    }

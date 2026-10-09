@@ -26,6 +26,7 @@ impl StateCenter {
             full_screen_scan_deadline: Instant::now(),
             last_window_activity: HashMap::new(),
             pending_idle_confirmations: HashMap::new(),
+            program_statuses: HashMap::new(),
             published_summary: None,
             pane_rows: Vec::new(),
             published_exposure_payload: None,
@@ -90,6 +91,7 @@ impl StateCenter {
                 process_generation: Some(generation),
                 sequence,
                 state,
+                blocked_kind: None,
                 changed_at,
             },
         );
@@ -115,6 +117,9 @@ impl StateCenter {
         self.full_screen_scan_deadline = Instant::now();
         self.last_window_activity.clear();
         self.pending_idle_confirmations.clear();
+        if !self.config.program_status_enabled {
+            self.program_statuses.clear();
+        }
     }
 
     fn apply_report(&mut self, record: AgentRecord, now: Instant) -> Result<(), String> {
@@ -195,6 +200,7 @@ impl StateCenter {
                     process_generation: Some(process_generation),
                     sequence,
                     state,
+                    blocked_kind: None,
                     changed_at: SystemTime::now(),
                 },
                 now,
@@ -208,6 +214,15 @@ impl StateCenter {
                 session_id,
             } => {
                 self.apply_exit(pane_id, session_id, now);
+                Ok(())
+            }
+            Request::ProgramStatus {
+                pane_id,
+                app,
+                state,
+                kind,
+            } => {
+                self.apply_program_status(pane_id, app, state, kind, now);
                 Ok(())
             }
             _ => Err("command is not a state event".into()),

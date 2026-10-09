@@ -80,6 +80,7 @@
             process_generation: None,
             sequence: 0,
             state: AgentState::Working,
+            blocked_kind: None,
             changed_at: SystemTime::now(),
         };
         assert_eq!(
@@ -208,6 +209,7 @@
             pane_title: String::new(),
             configured_tool: "pi".into(),
             pane_active: false,
+            pipe_open: false,
             visible: false,
             popup_host: None,
             popup_active: false,
@@ -242,6 +244,7 @@
             pane_title: String::new(),
             configured_tool: "pi".into(),
             pane_active: false,
+            pipe_open: false,
             visible: false,
             popup_host: None,
             popup_active: false,

@@ -72,6 +72,17 @@ else
   tmux bind-key -T root MouseDown1Status switch-client -t =
 fi
 
+# Pi sends OSC 7501 program status only after the terminal answers its support
+# query, which tmux never forwards. Force reporting for agents started in this
+# server so the daemon's pipe-pane relay receives structured state; disabling
+# the option removes the variable instead of leaving it behind.
+program_status_enabled="$(get_tmux_option @agent_program_status 'on')"
+if [ "$program_status_enabled" = on ]; then
+  tmux set-environment -g PI_PROGRAM_STATUS 1
+else
+  tmux set-environment -gu PI_PROGRAM_STATUS
+fi
+
 # tmux's session-closed hook exposes only the reusable session name, not the
 # immutable session ID. The daemon reconciles its records against live pane and
 # session IDs instead. Remove obsolete hooks owned by this checkout without

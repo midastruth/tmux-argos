@@ -1,4 +1,4 @@
-use crate::protocol::{AgentState, Request};
+use crate::protocol::{AgentState, BlockedKind, ProgramState, Request};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -47,6 +47,7 @@ pub struct Config {
     pub screen_interval: Duration,
     pub screen_full_scan_interval: Duration,
     pub state_ttl: Duration,
+    pub program_status_enabled: bool,
     pub detect_commands: HashSet<String>,
     pub wrapper_commands: HashSet<String>,
     pub state_exposure: ExposureMode,
@@ -166,6 +167,7 @@ impl Config {
             screen_interval: Duration::from_millis(screen_ms),
             screen_full_scan_interval: Duration::from_millis(full_scan_ms),
             state_ttl: Duration::from_secs(ttl),
+            program_status_enabled: config_value(values, "@agent_program_status", "on") == "on",
             detect_commands: word_set(&config_value(
                 values,
                 "@agent_detect_commands",
@@ -199,6 +201,7 @@ impl Config {
             screen_interval: Duration::from_secs(1),
             screen_full_scan_interval: Duration::from_secs(30),
             state_ttl: Duration::from_secs(60),
+            program_status_enabled: true,
             detect_commands: word_set("pi codex claude"),
             wrapper_commands: word_set("node bun npx npm pnpm yarn"),
             state_exposure: ExposureMode::Off,
@@ -218,6 +221,9 @@ struct AgentRecord {
     process_generation: Option<String>,
     sequence: u64,
     state: AgentState,
+    /// OSC 7501 reason for a `blocked` state; None for every other state and
+    /// for blocked states inferred from the screen.
+    blocked_kind: Option<BlockedKind>,
     changed_at: SystemTime,
 }
 
@@ -253,6 +259,9 @@ struct PaneRow {
     pane_title: String,
     configured_tool: String,
     pane_active: bool,
+    /// tmux `pane_pipe`: a pipe-pane command, normally the program status
+    /// relay, currently receives this pane's output.
+    pipe_open: bool,
     // Captured in the same list-panes call so screen_display_state can decide a
     // finished turn is "done" vs "seen idle" without a per-pane display-message
     // fork on every screen scan.
@@ -320,6 +329,7 @@ pub struct StateCenter {
     full_screen_scan_deadline: Instant,
     last_window_activity: HashMap<String, u64>,
     pending_idle_confirmations: HashMap<String, PendingIdleConfirmation>,
+    program_statuses: HashMap<String, PaneProgramStatus>,
     published_summary: Option<String>,
     pane_rows: Vec<PaneRow>,
     published_exposure_payload: Option<String>,
@@ -337,6 +347,7 @@ include!("model/state_output.rs");
 include!("model/screen_io.rs");
 include!("model/screen_detection.rs");
 include!("model/screen_detection_tools.rs");
+include!("model/program_status.rs");
 
 #[cfg(test)]
 mod tests {
@@ -348,4 +359,5 @@ mod tests {
     include!("model/tests_source.rs");
     include!("model/tests_detection.rs");
     include!("model/tests_screen_io.rs");
+    include!("model/tests_program_status.rs");
 }

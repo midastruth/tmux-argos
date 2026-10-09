@@ -123,6 +123,9 @@ impl StateCenter {
                 let record = self.pane_agent_record(&row.pane_id);
                 let agent = self.recognized_agent(row, record);
                 let agent_state = record.map(|value| state_label(value.state));
+                let blocked_kind = record
+                    .and_then(|value| value.blocked_kind)
+                    .map(blocked_kind_label);
                 let changed_at = record.map(|value| {
                     value
                         .changed_at
@@ -163,6 +166,7 @@ impl StateCenter {
                     "agent": agent,
                     "activity": if active { "active" } else { "idle" },
                     "agentState": agent_state,
+                    "blockedKind": blocked_kind,
                     "changedAt": changed_at
                 })
             })

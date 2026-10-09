@@ -20,6 +20,7 @@
             pane_title: "agent \"title\"".into(),
             configured_tool: "pi".into(),
             pane_active: true,
+            pipe_open: false,
             visible: true,
             popup_host: None,
             popup_active: false,
@@ -116,6 +117,7 @@
             "",
             "",
             "",
+            "0",
         ];
         let record = fields.join(&separator.to_string());
         let pane = parse_pane_record(&record).unwrap();
@@ -124,6 +126,7 @@
         assert!(pane.visible);
         assert!(pane.popup_host.is_none());
         assert!(!pane.popup_active);
+        assert!(!pane.pipe_open);
 
         fields[16] = "/dev/pts/1";
         fields[17] = "$0";

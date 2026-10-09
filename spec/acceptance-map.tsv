@@ -3,3 +3,4 @@ protected-bulk-kill	bash
 malformed-state-fails-closed	bash
 unseen-completion	rust
 native-history-resume	bash
+program-status-authority	rust

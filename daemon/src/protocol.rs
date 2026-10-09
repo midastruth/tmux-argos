@@ -5,6 +5,8 @@ use std::os::unix::net::UnixStream;
 
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_FIELD_BYTES: usize = 1024;
+/// OSC 7501 limits `app` to a short machine-readable program name.
+const MAX_PROGRAM_APP_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -25,6 +27,14 @@ pub enum Request {
         pane_id: Option<String>,
         session_id: Option<String>,
     },
+    /// A top-level OSC 7501 program status record relayed from a pane's
+    /// output stream.
+    ProgramStatus {
+        pane_id: String,
+        app: Option<String>,
+        state: ProgramState,
+        kind: Option<BlockedKind>,
+    },
     ReloadConfig,
     Shutdown,
     Snapshot,
@@ -39,6 +49,28 @@ pub enum AgentState {
     Working,
     Done,
     Idle,
+}
+
+/// States defined by the OSC 7501 Program Status Protocol. `Clear` withdraws
+/// the program's report instead of describing a state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgramState {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    Error,
+    Clear,
+}
+
+/// Reason a program reported `blocked`, as defined by OSC 7501 `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockedKind {
+    Permission,
+    Question,
+    Auth,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,6 +150,32 @@ fn validate_exit(pane_id: Option<&str>, session_id: Option<&str>) -> Result<(), 
     Ok(())
 }
 
+fn validate_program_app(app: &str) -> Result<(), String> {
+    let allowed_characters = app
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'+' | b'-'));
+    if app.is_empty() || app.len() > MAX_PROGRAM_APP_BYTES || !allowed_characters {
+        return Err("invalid app".into());
+    }
+    Ok(())
+}
+
+fn validate_program_status(
+    pane_id: &str,
+    app: Option<&str>,
+    state: ProgramState,
+    kind: Option<BlockedKind>,
+) -> Result<(), String> {
+    validate_identifier("pane_id", pane_id, '%')?;
+    if let Some(value) = app {
+        validate_program_app(value)?;
+    }
+    if kind.is_some() && state != ProgramState::Blocked {
+        return Err("kind is only valid for a blocked program status".into());
+    }
+    Ok(())
+}
+
 pub fn validate_request(request: &Request) -> Result<(), String> {
     match request {
         Request::Report {
@@ -136,6 +194,12 @@ pub fn validate_request(request: &Request) -> Result<(), String> {
             pane_id,
             session_id,
         } => validate_exit(pane_id.as_deref(), session_id.as_deref()),
+        Request::ProgramStatus {
+            pane_id,
+            app,
+            state,
+            kind,
+        } => validate_program_status(pane_id, app.as_deref(), *state, *kind),
         _ => Ok(()),
     }
 }

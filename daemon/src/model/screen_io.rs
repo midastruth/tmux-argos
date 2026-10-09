@@ -64,6 +64,14 @@ fn state_label(state: AgentState) -> &'static str {
     }
 }
 
+fn blocked_kind_label(kind: BlockedKind) -> &'static str {
+    match kind {
+        BlockedKind::Permission => "permission",
+        BlockedKind::Question => "question",
+        BlockedKind::Auth => "auth",
+    }
+}
+
 fn is_screen_detected_tool(tool: &str) -> bool {
     matches!(tool, "pi" | "claude" | "codex")
 }
@@ -128,7 +136,7 @@ fn parse_pane_record(record: &str) -> Option<PaneRow> {
     let record = record.strip_prefix('\n').unwrap_or(record);
     let record = record.strip_prefix('\r').unwrap_or(record);
     let fields: Vec<&str> = record.split(PANE_FIELD_SEPARATOR).collect();
-    if fields.len() != 21 {
+    if fields.len() != 22 {
         return None;
     }
     if fields[0].is_empty()
@@ -141,6 +149,7 @@ fn parse_pane_record(record: &str) -> Option<PaneRow> {
     let session_attached = fields[2].parse::<u32>().ok()? > 0;
     let window_active = parse_pane_flag(fields[7])?;
     let pane_active = parse_pane_flag(fields[15])?;
+    let pipe_open = parse_pane_flag(fields[21])?;
     let popup_host = parse_popup_host(&fields);
     let popup_active = popup_host.is_some() && fields[20] == "on";
     Some(PaneRow {
@@ -160,6 +169,7 @@ fn parse_pane_record(record: &str) -> Option<PaneRow> {
         pane_title: fields[13].into(),
         configured_tool: fields[14].into(),
         pane_active,
+        pipe_open,
         visible: session_attached && window_active && pane_active,
         popup_host,
         popup_active,
@@ -180,7 +190,7 @@ fn list_pane_rows(server_socket: &str) -> Option<Vec<PaneRow>> {
         "#{s|\x1f| |;s|\x1e| |:@agent_popup_host_session_id}\x1f",
         "#{s|\x1f| |;s|\x1e| |:@agent_popup_host_window_id}\x1f",
         "#{s|\x1f| |;s|\x1e| |:@agent_popup_host_pane_id}\x1f",
-        "#{s|\x1f| |;s|\x1e| |:@agent_popup_active}\x1e"
+        "#{s|\x1f| |;s|\x1e| |:@agent_popup_active}\x1f#{pane_pipe}\x1e"
     );
     let output = tmux_output(server_socket, &["list-panes", "-a", "-F", format])?;
     Some(

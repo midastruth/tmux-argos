@@ -1,4 +1,5 @@
 mod model;
+mod program_status_relay;
 mod protocol;
 
 #[cfg(test)]
@@ -40,36 +41,47 @@ fn run() -> Result<(), String> {
     let paths = runtime_paths(&server)?;
     match command.as_str() {
         "serve" => serve(&paths, &server),
-        "ensure" => {
-            ensure_daemon(&paths, &server)?;
-            let response = send_request(&paths.socket, &Request::Ensure)?;
-            print_response(response)
-        }
-        "snapshot" | "inspect" => {
-            ensure_daemon(&paths, &server)?;
-            let request = state_read_request(&command);
-            print_response(send_request(&paths.socket, &request)?)
-        }
-        "snapshot-picker" => {
-            ensure_daemon(&paths, &server)?;
-            print_picker_snapshot(send_request(&paths.socket, &Request::Snapshot)?)
-        }
-        "reload" => {
-            ensure_daemon(&paths, &server)?;
-            print_response(send_request(&paths.socket, &Request::ReloadConfig)?)
-        }
+        "shutdown" => print_response(send_request(&paths.socket, &Request::Shutdown)?),
+        "program-status-relay" => relay_program_status(&paths, args.next()),
+        _ => run_client_command(&command, args.next(), &paths, &server),
+    }
+}
+
+/// Commands that start the daemon on demand before sending their request.
+fn run_client_command(
+    command: &str,
+    argument: Option<String>,
+    paths: &RuntimePaths,
+    server: &TmuxServerInfo,
+) -> Result<(), String> {
+    let request = match command {
+        "ensure" => Request::Ensure,
+        "snapshot" | "inspect" | "snapshot-picker" => state_read_request(command),
+        "reload" => Request::ReloadConfig,
         "send" => {
-            let json = args.next().ok_or("send requires one JSON request")?;
+            let json = argument.ok_or("send requires one JSON request")?;
             if json.len() > protocol::MAX_MESSAGE_BYTES {
                 return Err("request exceeds 64 KiB".into());
             }
-            let request: Request = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-            ensure_daemon(&paths, &server)?;
-            print_response(send_request(&paths.socket, &request)?)
+            serde_json::from_str(&json).map_err(|e| e.to_string())?
         }
-        "shutdown" => print_response(send_request(&paths.socket, &Request::Shutdown)?),
-        _ => Err(format!("unknown command: {command}")),
+        _ => return Err(format!("unknown command: {command}")),
+    };
+    ensure_daemon(paths, server)?;
+    let response = send_request(&paths.socket, &request)?;
+    if command == "snapshot-picker" {
+        return print_picker_snapshot(response);
     }
+    print_response(response)
+}
+
+/// Never starts a daemon: a relay outliving its daemon must not resurrect one,
+/// and a replacement daemon for the same server listens on the same path.
+fn relay_program_status(paths: &RuntimePaths, pane_id: Option<String>) -> Result<(), String> {
+    let pane_id = pane_id.ok_or("program-status-relay requires a pane ID")?;
+    let send = |request| drop(send_request(&paths.socket, &request));
+    program_status_relay::relay(&pane_id, std::io::stdin().lock(), send)
+        .map_err(|error| error.to_string())
 }
 
 fn state_read_request(command: &str) -> Request {

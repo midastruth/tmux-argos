@@ -12,6 +12,7 @@ impl StateCenter {
     fn select_dirty_panes(
         &mut self,
         resolved: &[(PaneRow, String)],
+        program_panes: &HashSet<String>,
         full_scan: bool,
         wall_clock_seconds: u64,
     ) -> (HashSet<String>, Vec<String>) {
@@ -24,6 +25,12 @@ impl StateCenter {
             active_keys.insert(key.clone());
             active_windows.insert(row.window_id.clone());
             let previous_activity = self.last_window_activity.get(&row.window_id).copied();
+            if program_panes.contains(&row.pane_id) {
+                // A structured report replaces capture-pane for this pane.
+                self.last_window_activity
+                    .insert(row.window_id.clone(), row.window_activity);
+                continue;
+            }
             if should_capture_screen(
                 self.agents.contains_key(&key),
                 self.pending_idle_confirmations.contains_key(&key),
@@ -82,9 +89,25 @@ impl StateCenter {
         }
         self.pending_idle_confirmations.remove(&key);
         let state = self.screen_display_state(previous.as_ref(), detection.state, row.visible);
-        let unchanged = previous
-            .as_ref()
-            .filter(|record| record.state == state && record.session_id == row.session_id);
+        self.insert_pane_record(key, row, tool, state, None);
+    }
+
+    /// Stores the detected state of an auto-detected pane, keeping the original
+    /// change time while state, blocking reason, and owning session persist.
+    fn insert_pane_record(
+        &mut self,
+        key: String,
+        row: PaneRow,
+        tool: String,
+        state: AgentState,
+        blocked_kind: Option<BlockedKind>,
+    ) {
+        let blocked_kind = blocked_kind.filter(|_| state == AgentState::Blocked);
+        let unchanged = self.agents.get(&key).filter(|record| {
+            record.state == state
+                && record.blocked_kind == blocked_kind
+                && record.session_id == row.session_id
+        });
         let changed_at = unchanged.map_or_else(SystemTime::now, |record| record.changed_at);
         self.agents.insert(
             key,
@@ -97,6 +120,7 @@ impl StateCenter {
                 process_generation: None,
                 sequence: 0,
                 state,
+                blocked_kind,
                 changed_at,
             },
         );
@@ -141,11 +165,20 @@ impl StateCenter {
             .unwrap_or_default()
             .as_secs();
         let resolved = self.resolve_screen_rows(rows);
+        self.prune_program_statuses(&resolved);
+        self.attach_program_status_relays(&resolved);
+        let program_panes: HashSet<String> = resolved
+            .iter()
+            .filter(|(row, tool)| self.has_program_status(&row.pane_id, tool))
+            .map(|(row, _)| row.pane_id.clone())
+            .collect();
         let (active_keys, dirty_panes) =
-            self.select_dirty_panes(&resolved, full_scan, wall_clock_seconds);
+            self.select_dirty_panes(&resolved, &program_panes, full_scan, wall_clock_seconds);
         let mut screens = self.capture_dirty_panes(&dirty_panes);
         for (row, tool) in resolved {
-            if let Some(screen) = screens.remove(&row.pane_id) {
+            if program_panes.contains(&row.pane_id) {
+                self.apply_program_detection(row, tool);
+            } else if let Some(screen) = screens.remove(&row.pane_id) {
                 self.apply_screen_detection(row, tool, &screen, now);
             }
         }

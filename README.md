@@ -16,7 +16,8 @@ or swap agents via `@agent_agents`.
 - 🔢 **Central picker** (`prefix` + `u`) listing every managed agent tmux session, plus panes where a known agent (pi/codex/claude) was started manually. A tool column shows which agent each row is.
 - 🤖 **Multi-agent and multi-instance**: manage pi, codex, and claude side by side; each `prefix` + `y` launch creates a numbered instance such as `pi-1`, `pi-2`, and `pi-3` by default. Numbers are global per agent, so two projects never both show `pi-1`.
 - 🟡 **Live status** per session: `blocked` / `working` / `done` / `idle`
-  (Herdr-style Pi/Codex/Claude screen detection; no agent extension required).
+  from Pi's structured OSC 7501 program status, with Herdr-style
+  Pi/Codex/Claude screen detection as the fallback; no agent extension required.
 - 🔌 **Structured state exposure**: optionally publish the complete tmux
   session/window/pane topology and recognized agent state as an atomic JSON file,
   through the daemon's private Unix socket, or both.
@@ -235,8 +236,8 @@ claude=claude"
 
 Make sure each agent's command is on your `PATH` (`pi`, `codex`, `claude`).
 The daemon detects all three directly from their tmux pane process, terminal
-title, and live screen text. Pi does not need a Pi extension or modified launch
-command.
+title, and live screen text, and additionally reads Pi's OSC 7501 program status.
+Pi does not need a Pi extension or modified launch command.
 
 ## Unified status daemon
 
@@ -307,6 +308,45 @@ false completion. A high-confidence visible idle signal bypasses the delay.
 When Pi/Codex/Claude settles from `working` or `blocked` to `idle`, the daemon
 publishes `done` if the pane is not currently visible; opening the pane sends
 `Seen` and changes `done` to `idle`.
+
+### OSC 7501 program status
+
+Pi reports its state with the
+[Program Status Protocol (OSC 7501)](https://www.superlogical.com/rex/docs/build/program-status).
+tmux discards these sequences, so the daemon reads them before tmux does:
+
+- The plugin runs `tmux set-environment -g PI_PROGRAM_STATUS 1`. Pi otherwise
+  reports only after the terminal answers its support query, and tmux answers
+  Pi's device-attributes query first, so Pi never enables reporting on its own.
+  Only Pi processes started after the plugin loads inherit the variable.
+- For each detected Pi pane without a pipe (`#{pane_pipe}` is `0`), the daemon
+  runs `tmux pipe-pane -O` with its own `program-status-relay` command. The
+  check runs inside tmux's command queue with `if-shell -F`, so an existing or
+  concurrently opened pipe is never replaced. tmux allows one pipe per pane:
+  while you pipe a Pi pane elsewhere, that pane uses screen detection.
+- The relay forwards only top-level `state`, `app`, and `kind` fields over the
+  daemon socket. Messages (`msg`), sub-task records (`id=`), and support queries
+  are ignored; other pane output is never forwarded.
+
+While a pane has a report whose `app` matches its detected agent, the report
+replaces `capture-pane` for that pane:
+
+| OSC 7501 state | State |
+| --- | --- |
+| `working` | `working` |
+| `blocked` | `blocked`, with `kind` (`permission`, `question`, `auth`) exposed as `blockedKind` |
+| `done` / `error` while the pane is not watched | `done` until seen |
+| `done` / `error` while watched, or `idle` | `idle` |
+| `clear` | report removed; screen detection resumes |
+
+A report applies immediately rather than after the next screen interval and
+needs no redraw confirmation. When the relay exits, tmux clears `pane_pipe`; the
+daemon then drops the report, falls back to screen detection, and attaches a
+new relay on a later scan. Claude Code and Codex keep using screen detection:
+inside tmux, Claude only reports after the same unanswerable support query, and
+Codex does not implement the protocol. Set `@agent_program_status off` to
+disable forced reporting, relays, and report handling; already attached relays
+keep running until their Pi exits.
 
 ### Structured state exposure
 
@@ -424,6 +464,7 @@ per pane, so every tmux session and window is represented without three separate
       "agent": "pi",
       "activity": "active",
       "agentState": "working",
+      "blockedKind": null,
       "changedAt": 1741000000
     }
   ]
@@ -432,6 +473,9 @@ per pane, so every tmux session and window is represented without three separate
 
 `activity` is `active` for `working` or `blocked`, and `idle` otherwise.
 `agentState` retains the detailed `blocked`, `working`, `done`, or `idle` state.
+`blockedKind` is `permission`, `question`, or `auth` while a structured OSC 7501
+report explains a `blocked` state, and null otherwise, including blocked states
+inferred from the screen.
 A recognized agent without an authoritative state has a null `agentState`; a
 non-agent pane has null `agent`, `agentState`, and `changedAt`. `paneActive`
 describes tmux selection, while `visible` additionally requires an attached
@@ -621,6 +665,7 @@ set -g @agent_animation_interval_ms  '1000'
 set -g @agent_screen_interval_ms           '1000'
 set -g @agent_screen_full_scan_interval_ms '30000'
 set -g @agent_state_ttl                    '259200'
+set -g @agent_program_status               'on'
 set -g @agent_state_exposure               'both'
 set -g @agent_state_file '' # default: ~/.cache/tmux-argos/<server_hash>/state.json
 set -g @agent_daemon_binary '/path/to/daemon/target/release/tmux-argos-state-daemon'
@@ -651,7 +696,7 @@ tmux run-shell /path/to/tmux-argos/tmux-argos.tmux
   in the chosen directory, records the origin window, agent, and instance, then
   attaches to it in a popup. With `@agent_multiple_instances off`, it instead
   opens or reuses the unnumbered `agent-<agent>-<hash-of-dir>` session.
-- The **daemon** discovers Pi, Codex, and Claude panes and derives their state from the live bottom screen without agent extensions.
+- The **daemon** discovers Pi, Codex, and Claude panes, relays Pi's OSC 7501 program status through `pipe-pane`, and otherwise derives state from the live bottom screen without agent extensions.
 - The **picker** lists tmux sessions matching the prefix and non-prefixed panes
   whose current command is in `@agent_detect_commands` (or a configured wrapper
   whose child process matches), reads state for managed sessions, shows a live

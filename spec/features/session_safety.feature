@@ -34,3 +34,11 @@ Feature: Managed agent session safety
     Given a saved Pi, Codex, or Claude conversation
     When the user resumes it from history mode
     Then the configured agent command receives its native resume reference
+
+  @test-id:program-status-authority
+  Scenario: A relayed Pi program report owns state and marks unseen completion
+    Given the Pi pane's output is relayed to the daemon
+    When Pi reports blocked with a permission reason
+    Then the pane is blocked and exposes the permission reason
+    When Pi later reports done while no client is watching the pane
+    Then the state becomes done until it is seen
